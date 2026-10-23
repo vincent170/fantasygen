@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Architecture Gallery – Fantasy City Builder</title>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1020; font-family: Inter, system-ui, sans-serif; color: #e8ecf6; }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    .bar { position: fixed; z-index: 5; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; padding: 6px; background: rgba(15, 19, 31, 0.86); border: 1px solid rgba(232, 194, 106, 0.28); border-radius: 12px; backdrop-filter: blur(10px); flex-wrap: wrap; justify-content: center; max-width: calc(100vw - 20px); }
+    #top { top: 10px; } #bottom { bottom: 10px; }
+    button { background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 7px 13px; font: 500 13px Inter, sans-serif; cursor: pointer; }
+    button:hover { background: rgba(255, 255, 255, 0.15); }
+    button.on { background: #e8c26a; color: #1a1708; border-color: #f6dc9c; font-weight: 700; }
+    h1 { font: 700 18px Cinzel, Georgia, serif; color: #f6dc9c; margin: 0 10px 0 6px; align-self: center; letter-spacing: 1px; }
+    a { color: #e8c26a; align-self: center; margin: 0 8px; font-size: 13px; }
+    #label { position: fixed; z-index: 5; left: 14px; top: 16px; max-width: 220px; color: #98a2bb; font-size: 12.5px; pointer-events: none; text-shadow: 0 1px 4px #000; }
+  </style>
+</head>
+<body>
+  <div class="bar" id="top"><h1>Architecture Gallery</h1><span id="styles"></span><a href="index.html">▶ Play the game</a></div>
+  <div class="bar" id="bottom"><span id="groups"></span><button id="tod">☀️ Day</button><button id="spin" class="on">⟳ Rotate</button></div>
+  <div id="label">Drag to orbit · scroll to zoom · each row shows building levels 1 → 3</div>
+  <script type="module">
+    import * as THREE from './lib/three.module.js';
+    import { Atlas } from './js/atlas.js';
+    import { Architect } from './js/architect.js';
+    import { toGeometry } from './js/kit.js';
+    import { BUILDINGS, LOTS, STYLES } from './js/data.js';
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.95;
+    document.body.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    const atlas = new Atlas();
+    const mat = new THREE.MeshStandardMaterial({ map: atlas.texture, emissiveMap: atlas.emissive, emissive: new THREE.Color(1, 0.95, 0.85), emissiveIntensity: 0, vertexColors: true, roughness: 0.88 });
+    const arc = new Architect(atlas);
+    const hemi = new THREE.HemisphereLight('#cfe3ff', '#6b7a5a', 1.0); scene.add(hemi);
+    const sun = new THREE.DirectionalLight('#fff3dd', 2.6); sun.position.set(30, 50, 20); sun.castShadow = true;
+    Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, far: 200 }); sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
+    scene.add(sun);
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(300, 48), new THREE.MeshStandardMaterial({ color: '#6f9a52', roughness: 1 }));
+    ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+
+    const GROUPS = [
+      ['house', 'Houses'], ['apt', 'Apartments'], ['shop', 'Shops'], ['office', 'Offices'], ['factory', 'Factories'],
+      ['civic', 'Services'], ['power', 'Utilities'], ['parks', 'Parks & Landmarks'], ['industries', 'Industries'],
+    ];
+    const state = { style: 1, group: 'house', night: false, spin: true, yaw: 0.6, pitch: 0.62, dist: 22, target: new THREE.Vector3(0, 0, 0) };
+    let content = new THREE.Group(); scene.add(content);
+
+    function build() {
+      scene.remove(content); content.traverse((o) => o.geometry && o.geometry.dispose()); content = new THREE.Group(); scene.add(content);
+      const add = (rec, col, row) => {
+        try { const { geo } = arc.generate(Object.assign({ x: col, z: row, w: rec.lw, d: rec.ld, facing: 2, y0: 0, seed: 11 + col * 7 + row * 13 }, rec)); const m = new THREE.Mesh(toGeometry(geo), mat); m.castShadow = m.receiveShadow = true; content.add(m); } catch (e) { console.warn(e); }
+      };
+      let w = 4, h = 4;
+      if (['house', 'apt', 'shop', 'office', 'factory'].includes(state.group)) {
+        const lots = LOTS[state.group].map((l) => l[0]);
+        for (let lvl = 1; lvl <= 3; lvl++) for (let v = 0; v < 3; v++) {
+          const lot = lots[(lvl - 1 + v) % lots.length];
+          add({ kind: 'zone', arch: state.group, style: state.style, level: lvl, lw: lot[0], ld: lot[1], seed: 100 + lvl * 31 + v * 17 + state.style * 7 }, v * 4.5, (lvl - 1) * 5);
+        }
+        w = 3 * 4.5; h = 15;
+      } else {
+        const cats = state.group === 'civic' ? ['education', 'health', 'police', 'fire', 'civic', 'waste', 'transit'] : state.group === 'power' ? ['power', 'water'] : state.group === 'parks' ? ['parks', 'landmarks'] : ['industries'];
+        const keys = Object.keys(BUILDINGS).filter((k) => cats.includes(BUILDINGS[k].cat) && k !== 'pylon' && k !== 'bus_stop');
+        let x = 0, z = 0, rowH = 0; const maxW = 26;
+        for (const k of keys) {
+          const d = BUILDINGS[k];
+          if (x + d.w > maxW) { x = 0; z += rowH + 1.5; rowH = 0; }
+          add({ kind: 'special', key: k, style: state.style, level: 1, lw: d.w, ld: d.d }, x, z);
+          x += d.w + 1.5; rowH = Math.max(rowH, d.d);
+        }
+        w = maxW; h = z + rowH;
+      }
+      state.target.set(w / 2 - 1, 0, h / 2 - 1);
+      state.dist = Math.max(24, Math.max(w, h) * 1.45);
+    }
+
+    function light() {
+      const n = state.night;
+      hemi.intensity = n ? 0.95 : 1.0; hemi.color.set(n ? '#2a3c70' : '#cfe3ff'); hemi.groundColor.set(n ? '#141a28' : '#6b7a5a');
+      sun.intensity = n ? 0.9 : 2.6; sun.color.set(n ? '#8ea8ff' : '#fff3dd');
+      mat.emissiveIntensity = n ? 1.1 : 0;
+      scene.background = new THREE.Color(n ? '#141f40' : '#a9c8e6'); scene.fog = new THREE.Fog(scene.background, 120, 400);
+      ground.material.color.set(n ? '#4a6b58' : '#6f9a52');
+    }
+
+    const stylesEl = document.getElementById('styles'), groupsEl = document.getElementById('groups');
+    const mkBtn = (parent, label, on, fn) => { const b = document.createElement('button'); b.textContent = label; if (on) b.classList.add('on'); b.onclick = () => { fn(); [...parent.children].forEach((c) => c.classList.toggle('on', c === b)); }; parent.appendChild(b); return b; };
+    STYLES.slice(0, 5).forEach((s) => mkBtn(stylesEl, s.icon + ' ' + s.name, s.id === state.style, () => { state.style = s.id; build(); }));
+    GROUPS.forEach(([id, label]) => mkBtn(groupsEl, label, id === state.group, () => { state.group = id; build(); }));
+    document.getElementById('tod').onclick = (e) => { state.night = !state.night; e.target.textContent = state.night ? '🌙 Night' : '☀️ Day'; light(); };
+    document.getElementById('spin').onclick = (e) => { state.spin = !state.spin; e.target.classList.toggle('on', state.spin); };
+
+    const cam = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
+    let drag = null;
+    renderer.domElement.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; renderer.domElement.setPointerCapture(e.pointerId); });
+    renderer.domElement.addEventListener('pointermove', (e) => { if (!drag) return; state.yaw -= (e.clientX - drag.x) * 0.006; state.pitch = Math.min(1.4, Math.max(0.12, state.pitch + (e.clientY - drag.y) * 0.005)); drag = { x: e.clientX, y: e.clientY }; });
+    renderer.domElement.addEventListener('pointerup', () => { drag = null; });
+    renderer.domElement.addEventListener('wheel', (e) => { e.preventDefault(); state.dist = Math.min(120, Math.max(5, state.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+
+    function resize() { renderer.setSize(innerWidth, innerHeight); cam.aspect = innerWidth / innerHeight; cam.updateProjectionMatrix(); }
+    addEventListener('resize', resize); resize();
+    build(); light(); atlas.flush();
+    let last = performance.now();
+    (function loop(t) {
+      const dt = Math.min(0.05, Math.max(0, (t - last) / 1000)); last = t;
+      if (state.spin && !drag) state.yaw += dt * 0.18;
+      atlas.flush();
+      const p = state.pitch, d = state.dist;
+      cam.position.set(state.target.x + Math.sin(state.yaw) * Math.cos(p) * d, Math.sin(p) * d, state.target.z + Math.cos(state.yaw) * Math.cos(p) * d);
+      cam.lookAt(state.target);
+      sun.position.copy(state.target).add(new THREE.Vector3(30, 55, 22)); sun.target.position.copy(state.target); sun.target.updateMatrixWorld();
+      renderer.render(scene, cam);
+      requestAnimationFrame(loop);
+    })(performance.now());
+  </script>
+</body>
+</html>
