@@ -1,5 +1,5 @@
 // World data: heightmap + per-tile layers, terrain generation and terraforming.
-import { MAP_N, Z, R, ROADS } from './data.js';
+import { MAP_N, Z, R, ROADS, AREA_N, AREA_SIZE } from './data.js';
 import { Noise, clamp, lerp, smoothstep, mulberry32, hash2 } from './util.js';
 
 export const DX = [0, 1, 0, -1];   // N, E, S, W  (N = -z)
@@ -22,6 +22,13 @@ export class World {
     this.pylon = new Uint8Array(t);
     this.park = new Uint8Array(t);      // painted parkland
     this.lot = new Uint8Array(t);       // ground kind under buildings (see LOT_KIND)
+    this.dist = new Uint8Array(t);      // district id (0 = none)
+    this.rdir = new Uint8Array(t);      // one-way direction + 1 (0 = two-way)
+    this.fert = new Uint8Array(t);      // natural resources 0..255
+    this.ore = new Uint8Array(t);
+    this.oil = new Uint8Array(t);
+    this.areas = new Uint8Array(AREA_N * AREA_N).fill(1);
+    this.canEdit = null;                // optional (x,z)->bool guard for terraforming
     this.rev = 0;                       // bumped on any structural edit (roads/zones/buildings)
     this.buildings = new Map();
     this.nextId = 1;
@@ -71,6 +78,9 @@ export class World {
     }
     return false;
   }
+
+  areaIndex(x, z) { return Math.min(AREA_N - 1, Math.floor(z / AREA_SIZE)) * AREA_N + Math.min(AREA_N - 1, Math.floor(x / AREA_SIZE)); }
+  owned(x, z) { return this.inb(x, z) && this.areas[this.areaIndex(x, z)] === 1; }
 
   roadAt(x, z) { return this.inb(x, z) ? this.road[z * this.n + x] : 0; }
   hasRoad(x, z) { const t = this.roadAt(x, z); return t >= 1 && t <= 5; }
@@ -199,6 +209,7 @@ export class World {
       const d = Math.hypot(i - cx, j - cz);
       if (d > r) continue;
       if (this.vertexLocked(i, j)) continue;
+      if (this.canEdit && !this.canEdit(Math.min(i, this.n - 1), Math.min(j, this.n - 1))) continue;
       const t = 1 - d / r;
       const w = t * t * (3 - 2 * t);
       const k = this.vi(i, j);
@@ -297,7 +308,7 @@ export class World {
     const rng = mulberry32(seed);
     const nz = new Noise(seed), nz2 = new Noise(seed + 101), nz3 = new Noise(seed + 977);
     this.road.fill(0); this.zone.fill(0); this.bid.fill(0); this.tree.fill(0); this.pylon.fill(0); this.park.fill(0); this.lot.fill(0);
-    this.zstyle.fill(0);
+    this.zstyle.fill(0); this.dist.fill(0); this.rdir.fill(0);
     this.buildings.clear(); this.nextId = 1;
 
     const rot = (rng() * 4) | 0;
@@ -424,10 +435,79 @@ export class World {
       if (f > thresh) this.tree[i] = f > thresh + 0.08 ? 2 : 1;
       else if (f > thresh - 0.06 && hash2(x, z, seed) < 0.25) this.tree[i] = 1;
     }
+    this.genResources(seed);
     this.dirty.trees = true;
     this.dirty.roads = true;
     this.markTerrain(0, 0, n - 1, n - 1);
     this.markGround(0, 0, n - 1, n - 1);
+  }
+
+  /** fertile land in lowlands near water, ore under hills, oil in scattered fields */
+  genResources(seed) {
+    const n = this.n;
+    const nf = new Noise(seed + 501), no = new Noise(seed + 733), nl = new Noise(seed + 919);
+    const nearWater = new Float32Array(n * n);
+    for (let z = 0; z < n; z++) for (let x = 0; x < n; x++) {
+      if (!this.water[z * n + x]) continue;
+      for (let dz = -5; dz <= 5; dz++) for (let dx = -5; dx <= 5; dx++) {
+        const a = x + dx, b = z + dz;
+        if (!this.inb(a, b)) continue;
+        const v = 1 - Math.hypot(dx, dz) / 6;
+        if (v > nearWater[b * n + a]) nearWater[b * n + a] = v;
+      }
+    }
+    for (let z = 0; z < n; z++) for (let x = 0; x < n; x++) {
+      const i = z * n + x;
+      if (this.water[i]) { this.fert[i] = this.ore[i] = this.oil[i] = 0; continue; }
+      const h = this.tileAvg(x, z), sl = this.tileSlope(x, z);
+      const f = nf.fbm(x * 0.05, z * 0.05, 3) * 0.7 + nearWater[i] * 0.45 - Math.max(0, h - 1.6) * 0.35 - sl * 0.4 - (h < 0.3 ? 0.3 : 0);
+      this.fert[i] = clamp(Math.round((f - 0.42) * 600), 0, 255);
+      const o = no.fbm(x * 0.07, z * 0.07, 4) + Math.max(0, h - 1.4) * 0.12;
+      this.ore[i] = clamp(Math.round((o - 0.6) * 900), 0, 255);
+      const l = nl.fbm(x * 0.045 + 13, z * 0.045 - 7, 4);
+      this.oil[i] = clamp(Math.round((l - 0.64) * 1100), 0, 255);
+    }
+  }
+
+  /**
+   * Lay a highway from the most land-like map edge into the starting area (CS-style outside connection).
+   * Returns the list of tiles used.
+   */
+  makeHighwayEntry(rng = Math.random) {
+    const n = this.n, mid = n >> 1;
+    const lo = AREA_SIZE, hi = n - AREA_SIZE - 1;     // starting area spans [lo, hi]
+    const cands = [];
+    for (let side = 0; side < 4; side++) {
+      for (const off of [-8, -4, 0, 4, 8]) {
+        const p = mid + off;
+        const tiles = [];
+        let water = 0, steep = 0;
+        for (let k = 0; k <= lo + 3; k++) {
+          const x = side === 0 ? p : side === 1 ? n - 1 - k : side === 2 ? p : k;
+          const z = side === 0 ? k : side === 1 ? p : side === 2 ? n - 1 - k : p;
+          tiles.push([x, z]);
+          const i = z * n + x;
+          if (this.water[i]) water++; else if (this.tileSlope(x, z) > 1.4) steep++;
+        }
+        cands.push({ tiles, score: water * 3 + steep * 6 + Math.abs(off) * 0.2 + rng() * 2 });
+      }
+    }
+    cands.sort((a, b) => a.score - b.score);
+    const best = cands[0];
+    if (!best || best.score > 60) return [];
+    for (const [x, z] of best.tiles) {
+      const i = z * n + x;
+      this.road[i] = R.HIGHWAY; this.tree[i] = 0; this.zone[i] = 0; this.park[i] = 0;
+      if (!this.water[i] && this.tileSlope(x, z) > 0.6) {
+        // grade the road bed
+        const avg = this.tileAvg(x, z);
+        for (const [a, b] of [[x, z], [x + 1, z], [x, z + 1], [x + 1, z + 1]]) this.h[this.vi(a, b)] = lerp(this.h[this.vi(a, b)], avg, 0.7);
+      }
+    }
+    this.updateTiles(0, 0, n - 1, n - 1);
+    this.dirty.roads = true; this.dirty.trees = true;
+    this.markTerrain(0, 0, n - 1, n - 1); this.markGround(0, 0, n - 1, n - 1);
+    return best.tiles;
   }
 
   // ------------------------------------------------------------ (de)serialisation
@@ -445,6 +525,7 @@ export class World {
       n: this.n, seed: this.seed,
       h: b64(hq), tree: b64(this.tree), road: b64(this.road), zone: b64(this.zone),
       zstyle: b64(this.zstyle), pylon: b64(this.pylon), park: b64(this.park),
+      dist: b64(this.dist), rdir: b64(this.rdir), fert: b64(this.fert), ore: b64(this.ore), oil: b64(this.oil), areas: Array.from(this.areas),
     };
   }
   fromJSON(o) {
@@ -460,6 +541,14 @@ export class World {
     this.zone.set(un(o.zone, Uint8Array)); this.zstyle.set(un(o.zstyle, Uint8Array));
     this.pylon.set(un(o.pylon, Uint8Array)); this.park.set(un(o.park, Uint8Array));
     this.seed = o.seed || 1;
+    this.dist.fill(0); this.rdir.fill(0);
+    if (o.dist) this.dist.set(un(o.dist, Uint8Array));
+    if (o.rdir) this.rdir.set(un(o.rdir, Uint8Array));
+    this.updateTiles(0, 0, this.n - 1, this.n - 1);
+    if (o.fert) { this.fert.set(un(o.fert, Uint8Array)); this.ore.set(un(o.ore, Uint8Array)); this.oil.set(un(o.oil, Uint8Array)); }
+    else this.genResources(this.seed);
+    this.areas.fill(1);
+    if (o.areas) this.areas.set(o.areas);
     this.bid.fill(0); this.lot.fill(0);
     this.buildings.clear();
     this.nextId = 1;

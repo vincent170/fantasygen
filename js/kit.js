@@ -20,6 +20,7 @@ export class MB {
     this.t = null;
     this.minY = 1e9; this.maxY = -1e9;
     this.smoke = [];
+    this.ao = false;            // darken walls near the ground (cheap contact shadow)
   }
 
   setT(ox, oy, oz, rot = 0) { this.t = { ox, oy, oz, c: Math.cos(rot), s: Math.sin(rot) }; return this; }
@@ -27,6 +28,10 @@ export class MB {
 
   vert(x, y, z, nx, ny, nz, u, v, tint, e) {
     const t = this.t;
+    if (this.ao && ny < 0.7 && y < 0.3) {
+      const k = Math.max(0, y) / 0.3, f = 0.62 + 0.38 * k * k * (3 - 2 * k);
+      tint = [tint[0] * f, tint[1] * f, tint[2] * f];
+    }
     if (t) {
       const X = x * t.c + z * t.s + t.ox, Z = -x * t.s + z * t.c + t.oz;
       const NX = nx * t.c + nz * t.s, NZ = -nx * t.s + nz * t.c;
@@ -193,6 +198,40 @@ export class MB {
       f(c00, c01, rb, ra, [-1, 1, 0]);
       f(c11, c10, ra, rb, [1, 1, 0]);
     }
+  }
+
+  /** gambrel (barn) roof, ridge along x: steep lower pitch to a knee, then a shallow upper pitch */
+  gambrel(x0, z0, x1, z1, y, rise, roofCell, tint, gableCell, gableTint, ov = 0.04) {
+    const X0 = x0 - ov, X1 = x1 + ov, Z0 = z0 - ov, Z1 = z1 + ov;
+    const D = z1 - z0, zm = (z0 + z1) / 2, yr = y + rise;
+    const ki = D * 0.17, kh = rise * 0.68;
+    const nu = Math.max(1, Math.round((X1 - X0) / 0.5));
+    const nv1 = Math.max(1, Math.round(Math.hypot(kh, ki + ov) / 0.32)), nv2 = Math.max(1, Math.round(Math.hypot(rise - kh, zm - (z0 + ki)) / 0.32));
+    this.grid([X0, y, Z1], [X1, y, Z1], [X1, y + kh, z1 - ki], [X0, y + kh, z1 - ki], nu, nv1, roofCell, tint, [0, 0.4, 1]);
+    this.grid([X0, y + kh, z1 - ki], [X1, y + kh, z1 - ki], [X1, yr, zm], [X0, yr, zm], nu, nv2, roofCell, tint, [0, 1, 0.3]);
+    this.grid([X1, y, Z0], [X0, y, Z0], [X0, y + kh, z0 + ki], [X1, y + kh, z0 + ki], nu, nv1, roofCell, tint, [0, 0.4, -1]);
+    this.grid([X1, y + kh, z0 + ki], [X0, y + kh, z0 + ki], [X0, yr, zm], [X1, yr, zm], nu, nv2, roofCell, tint, [0, 1, -0.3]);
+    if (gableCell) {
+      gableTint = gableTint || tint;
+      for (const [x, s] of [[x0, -1], [x1, 1]]) {
+        const pts = [[x, y, z1], [x, y + kh, z1 - ki], [x, yr, zm], [x, y + kh, z0 + ki], [x, y, z0]];
+        const c = [x, y, zm];
+        const uvOf = (p) => [(p[2] - z0) / D, 1 - (p[1] - y) / rise];
+        for (let i = 0; i < 4; i++) this.tri(c, pts[i], pts[i + 1], gableCell, gableTint, { out: [s, 0, 0], uv: [uvOf(c), uvOf(pts[i]), uvOf(pts[i + 1])] });
+      }
+    }
+  }
+
+  /** mansard roof: steep sides up to an inset flat top */
+  mansard(x0, z0, x1, z1, y, h, ins, roofCell, tint, topCell, ov = 0.02) {
+    const X0 = x0 - ov, X1 = x1 + ov, Z0 = z0 - ov, Z1 = z1 + ov, yt = y + h;
+    const a = [x0 + ins, z0 + ins], c = [x1 - ins, z1 - ins];
+    const nv = Math.max(1, Math.round(Math.hypot(h, ins) / 0.3));
+    this.grid([X0, y, Z1], [X1, y, Z1], [c[0], yt, c[1]], [a[0], yt, c[1]], Math.max(1, Math.round((X1 - X0) / 0.4)), nv, roofCell, tint, [0, 0.3, 1]);
+    this.grid([X1, y, Z0], [X0, y, Z0], [a[0], yt, a[1]], [c[0], yt, a[1]], Math.max(1, Math.round((X1 - X0) / 0.4)), nv, roofCell, tint, [0, 0.3, -1]);
+    this.grid([X1, y, Z1], [X1, y, Z0], [c[0], yt, a[1]], [c[0], yt, c[1]], Math.max(1, Math.round((Z1 - Z0) / 0.4)), nv, roofCell, tint, [1, 0.3, 0]);
+    this.grid([X0, y, Z0], [X0, y, Z1], [a[0], yt, c[1]], [a[0], yt, a[1]], Math.max(1, Math.round((Z1 - Z0) / 0.4)), nv, roofCell, tint, [-1, 0.3, 0]);
+    this.flatQuad(a[0], a[1], c[0], c[1], yt, topCell || roofCell, tint);
   }
 
   /** pyramid / cone with n sides */

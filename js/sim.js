@@ -1,14 +1,17 @@
 // City simulation: growth, economy, utilities, services, happiness, laws, industries, events.
 import { clamp, lerp, smoothstep, hash2, mulberry32, pick } from './util.js';
-import { MAP_N, POP_CAP, Z, ZONE_INFO, LOTS, LOT_TYPES, ARCH_INFO, R, ROADS, BUILDINGS, INDUSTRIES, INDUSTRY_POLICIES, LAWS, MILESTONES, STYLES } from './data.js';
+import { MAP_N, POP_CAP, Z, ZONE_INFO, LOTS, LOT_TYPES, ARCH_INFO, R, ROADS, BUILDINGS, INDUSTRIES, INDUSTRY_POLICIES, LAWS, MILESTONES, STYLES, isBuildZone, RES_ARCH, COM_ARCH, IND_ARCH, SPECIALIZATIONS, AREA_N } from './data.js';
+import { SimExt } from './sim_ext.js';
 import { DX, DZ } from './world.js';
 import { LOT_KIND } from './ground.js';
+import { weatherStep, weatherFx, heatingDemand } from './weather.js';
 
 const DAY_INTERVAL = [Infinity, 2.2, 0.9, 0.38];
-const BUDGET_KEYS = ['police', 'fire', 'health', 'edu', 'waste', 'transit', 'parks'];
+const BUDGET_KEYS = ['police', 'fire', 'health', 'edu', 'waste', 'transit', 'parks', 'comms'];
 const CAT_BUDGET = { police: 'police', fire: 'fire', health: 'health', education: 'edu', waste: 'waste', transit: 'transit', parks: 'parks', landmarks: 'parks' };
+const NO_ROAD_NEEDED = new Set(['pylon', 'wind', 'solar', 'lighthouse', 'monument', 'hydro']);
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const ZONE_LOT = { house: 'lawn', apt: 'pave', shop: 'pave', office: 'pave', factory: 'dirt' };
+const ZONE_LOT = { house: 'lawn', row: 'lawn', apt: 'pave', mixed: 'pave', shop: 'pave', store: 'pave', office: 'pave', factory: 'dirt', agri: 'farm', forest: 'dirt', ore: 'rock', oil: 'dirt' };
 
 const EVENT_DEFS = [
   { id: 'heat', name: 'Heat wave', icon: '🥵', days: 20, minPop: 300, msg: 'A heat wave: air-conditioning pushes power demand up 25%.', fx: { power: 1.25 } },
@@ -23,10 +26,10 @@ export function defaultState(opts = {}) {
   const sandbox = opts.mode === 'sandbox';
   return {
     name: opts.name || 'Fairhaven', mode: sandbox ? 'sandbox' : 'career',
-    money: sandbox ? 9999999 : 60000, day: 1, month: 0, year: 1, totalDays: 0, tod: 9.5, speed: 1, dayAcc: 0,
+    money: sandbox ? 9999999 : 60000, day: 1, month: 3, year: 1, totalDays: 0, tod: 9.5, speed: 1, dayAcc: 0,
     pop: 0, workforce: 0, jobsTotal: 0, jobsC: 0, jobsI: 0, jobsS: 0, unemployment: 0, resCap: 0,
-    demand: { r: 0.6, c: 0.1, i: 0.3 }, tax: { r: 9, c: 9, i: 9 },
-    budget: { police: 100, fire: 100, health: 100, edu: 100, waste: 100, transit: 100, parks: 100 },
+    demand: { r: 0.6, c: 0.1, i: 0.3, o: 0 }, tax: { r: 9, c: 9, i: 9, o: 9 },
+    budget: { police: 100, fire: 100, health: 100, edu: 100, waste: 100, transit: 100, parks: 100, comms: 100 },
     laws: {}, policies: {}, style: 0,
     happy: 60, happyParts: [], health: 50, edu: 0, crime: 0, pollution: 0, noise: 0, traffic: 0, tourism: 0,
     power: { supply: 0, demand: 0 }, water: { supply: 0, demand: 0 }, sewage: { cap: 0, demand: 0 },
@@ -35,6 +38,9 @@ export function defaultState(opts = {}) {
     hist: [], log: [], milestone: 0, popPeak: 0, loan: 0, enforcement: 0.3, prisoners: 0, capReached: false,
     stats: { fires: 0, crimes: 0, solved: 0, births: 0 }, outside: false, seed: opts.seed || 1,
     unlocked: {}, advisorCool: {}, trips: 0, disasters: true, events: [],
+    climate: opts.climate || 'temperate', weatherOn: true, weather: { type: 'clear', days: 3, snowCover: 0, temp: 12 },
+    jobsO: 0, districts: [], lines: [], chirps: [], fees: { power: 100, water: 100 }, permits: sandbox ? 99 : 0, death: { backlog: 0, rate: 0, cap: 0 }, activeDisasters: [],
+    transitRiders: 0, transitFares: 0, version: 2,
   };
 }
 
@@ -45,6 +51,7 @@ export class Sim {
     const N = this.w.n * this.w.n;
     this.maps = {
       police: new Float32Array(N), fire: new Float32Array(N), health: new Float32Array(N), edu: new Float32Array(N), waste: new Float32Array(N), transit: new Float32Array(N),
+      death: new Float32Array(N), post: new Float32Array(N), tele: new Float32Array(N), shelter: new Float32Array(N), dru: new Float32Array(N),
       pollution: new Float32Array(N), noise: new Float32Array(N), crime: new Float32Array(N), landvalue: new Float32Array(N), happy: new Float32Array(N), park: new Float32Array(N),
     };
     this.pw = new Uint8Array(N); this.wt = new Uint8Array(N); this.sw = new Uint8Array(N);
@@ -63,9 +70,16 @@ export class Sim {
     this.w.buildings.clear(); this.w.bid.fill(0); this.w.lot.fill(0);
     this.w.nextId = 1; this.w.stops = new Map();
     this.rng = mulberry32((opts.seed || 1) * 7 + 3);
+    // map areas: the four central areas are yours to start with (all of them in sandbox)
+    const a = this.w.areas;
+    a.fill(this.S.mode === 'sandbox' ? 1 : 0);
+    for (const k of [5, 6, 9, 10]) a[k] = 1;
+    this.w.dist.fill(0);
+    this.dfx = {};
     this.mapsDirty = true; this.law = {}; this.recomputeLaws();
     this.log('Welcome to ' + this.S.name + '! Start by laying a road, then zone the land beside it.', 'info');
     this.log('Tip: power & water travel along roads. Build a power plant and a water pump, then connect them with roads.', 'tip');
+    this.log('Tip: a highway enters your land from the map edge — connect your first road to it so people can move in.', 'tip');
     this.computeNetworks(); this.updateMaps(true);
   }
 
@@ -81,7 +95,8 @@ export class Sim {
   isUnlocked(def) { return this.sandbox() || (def.unlock || 0) <= this.S.popPeak; }
   canAfford(c) { return this.sandbox() || this.S.money >= c; }
   spend(c) { if (!this.sandbox()) this.S.money -= c; }
-  budgetScale(cat) { const k = CAT_BUDGET[cat]; return k ? this.S.budget[k] / 100 : 1; }
+  budgetScale(cat) { const k = CAT_BUDGET[cat] || (BUDGET_KEYS.includes(cat) ? cat : null); return k ? (this.S.budget[k] || 100) / 100 : 1; }
+  budgetOf(def) { const k = this.budgetKeyOf(def); return k ? (this.S.budget[k] || 100) / 100 : 1; }
   defOf(b) { return b.kind === 'zone' ? null : BUILDINGS[b.key]; }
   blist() { return this.w.buildings.values(); }
   touchWorld() { this.w.rev++; this.mapsDirty = true; }
@@ -99,6 +114,7 @@ export class Sim {
     if (!w.inb(x, z)) return false;
     const i = z * w.n + x;
     if (w.bid[i] || w.pylon[i]) return false;
+    if (!this.ownsTile(x, z)) return false;
     const cur = w.road[i];
     if (cur && (cur === R.RAIL) !== (type === R.RAIL)) return false;
     if (type === R.RAIL && w.water[i]) { /* rail bridges allowed */ }
@@ -114,6 +130,7 @@ export class Sim {
     if (!this.canAfford(cost)) return false;
     this.spend(cost);
     w.road[i] = type; w.tree[i] = 0; w.park[i] = 0; w.zone[i] = 0;
+    if (type === R.RAIL || type === R.HIGHWAY || type === R.LANE) w.rdir[i] = 0;
     w.dirty.roads = true; w.dirty.trees = true;
     w.markGround(x - 1, z - 1, x + 1, z + 1);
     this.touchWorld();
@@ -122,7 +139,7 @@ export class Sim {
   removeRoad(x, z) {
     const w = this.w, i = z * w.n + x;
     if (!w.road[i]) return false;
-    w.road[i] = 0;
+    w.road[i] = 0; w.rdir[i] = 0;
     // remove bus stop on this tile
     if (w.stops && w.stops.has(i)) this.removeBuilding(w.stops.get(i));
     w.dirty.roads = true;
@@ -134,7 +151,7 @@ export class Sim {
     const w = this.w;
     if (!w.inb(x, z)) return false;
     const i = z * w.n + x;
-    if (w.pylon[i] || w.road[i] || w.bid[i] || w.water[i]) return false;
+    if (w.pylon[i] || w.road[i] || w.bid[i] || w.water[i] || !this.ownsTile(x, z)) return false;
     const c = BUILDINGS.pylon.cost;
     if (!this.canAfford(c)) return false;
     this.spend(c);
@@ -155,7 +172,7 @@ export class Sim {
     if (!w.inb(x, z)) return false;
     const i = z * w.n + x;
     if (w.road[i] || w.bid[i] || w.water[i] || w.pylon[i]) return false;
-    if (zone && !w.buildable(x, z)) return false;
+    if (zone && (!w.buildable(x, z) || !this.ownsTile(x, z))) return false;
     if (zone === Z.PARK) return this.paintPark(x, z);
     if (w.zone[i] === zone && w.zstyle[i] === style) return false;
     if (zone && !w.zone[i]) { const c = 2; if (!this.canAfford(c)) return false; this.spend(c); }
@@ -167,7 +184,7 @@ export class Sim {
   }
   paintPark(x, z) {
     const w = this.w, i = z * w.n + x;
-    if (w.park[i] || !w.buildable(x, z) || w.road[i] || w.bid[i]) return false;
+    if (w.park[i] || !w.buildable(x, z) || w.road[i] || w.bid[i] || !this.ownsTile(x, z)) return false;
     if (!this.canAfford(4)) return false;
     this.spend(4);
     w.park[i] = 1; w.zone[i] = 0; w.tree[i] = 0; w.dirty.trees = true;
@@ -196,6 +213,7 @@ export class Sim {
     const [fw, fd] = this.footprint(def, facing);
     if (def.place === 'road') {
       if (!w.inb(x, z)) return { ok: false, reason: 'Out of bounds' };
+      if (!this.ownsTile(x, z)) return { ok: false, reason: 'You don\'t own this land' };
       const t = w.road[z * w.n + x];
       if (t < 2 || t > 4 || w.water[z * w.n + x]) return { ok: false, reason: 'Place on a paved street or avenue' };
       if (w.stops && w.stops.has(z * w.n + x)) return { ok: false, reason: 'Already a stop here' };
@@ -208,10 +226,10 @@ export class Sim {
       if (inside) {
         if (!w.inb(tx, tz)) return { ok: false, reason: 'Out of bounds' };
         const idx = tz * w.n + tx;
+        if (!this.ownsTile(tx, tz)) return { ok: false, reason: 'You don\'t own this land (buy it under Areas)' };
         if (w.road[idx] || w.bid[idx] || w.pylon[idx]) return { ok: false, reason: 'Tile is occupied' };
         if (w.water[idx]) return { ok: false, reason: 'Cannot build on water' };
         if (!w.buildable(tx, tz)) return { ok: false, reason: 'Terrain too steep or too low' };
-        if (w.zone[idx] && w.zone[idx] !== Z.PARK) { /* will clear zoning */ }
       } else if (w.inb(tx, tz)) {
         const idx = tz * w.n + tx;
         if (w.water[idx]) shore = true;
@@ -221,6 +239,7 @@ export class Sim {
       }
     }
     if (def.place === 'shore' && !shore) return { ok: false, reason: 'Must be built on the water\'s edge' };
+    if (!adjRoad && !NO_ROAD_NEEDED.has(key)) return { ok: false, reason: 'Needs road access — place it next to a road' };
     if (def.place === 'rail' && !adjRail) return { ok: false, reason: 'Must be built beside a railway' };
     if (key === 'port' && !this.deepShoreNear(x, z, fw, fd)) return { ok: false, reason: 'Needs deep water at the shore' };
     if (key === 'lumber' && this.countTiles(x, z, fw, fd, 8, (i) => this.w.tree[i] > 0) < 12) return { ok: false, reason: 'Needs 12+ forest tiles within 8 tiles' };
@@ -229,7 +248,8 @@ export class Sim {
     if (key === 'tech') { let ok = false; for (const b of this.blist()) if (b.key === 'university') ok = true; if (!ok) return { ok: false, reason: 'Needs a University' }; }
     if (key === 'farm') { let low = 0; for (let tz = z; tz < z + fd; tz++) for (let tx = x; tx < x + fw; tx++) if (w.tileAvg(tx, tz) < 0.4) low++; if (low > 4) return { ok: false, reason: 'Needs solid grassland, not beach' }; }
     if (key === 'resort') { let nice = 0; for (let tz = z - 4; tz < z + fd + 4; tz++) for (let tx = x - 4; tx < x + fw + 4; tx++) if (w.inb(tx, tz) && (w.water[tz * w.n + tx] || w.park[tz * w.n + tx])) nice++; if (nice < 6) return { ok: false, reason: 'Needs water or parkland nearby' }; }
-    if (key === 'hydro') { /* shore ok */ }
+    if (key === 'airport') { for (const b of this.blist()) if (b.key === 'airport') return { ok: false, reason: 'Only one airport' }; }
+    if (def.cat === 'landmarks' && ['cathedral', 'opera', 'arch', 'observatory', 'capitol'].includes(key)) { for (const b of this.blist()) if (b.key === key) return { ok: false, reason: 'Unique building: already built' }; }
     return { ok: true, adjRoad };
   }
   countTiles(x, z, fw, fd, r, fn) {
@@ -272,6 +292,7 @@ export class Sim {
       if (inside) {
         if (!w.inb(tx, tz)) return { ok: false, reason: 'Out of bounds' };
         const idx = tz * w.n + tx;
+        if (!this.ownsTile(tx, tz)) return { ok: false, reason: 'You don\'t own this land' };
         if (w.road[idx] || w.bid[idx] || w.pylon[idx]) return { ok: false, reason: 'Tile is occupied' };
         if (w.water[idx]) return { ok: false, reason: 'Cannot build on water' };
         if (!w.buildable(tx, tz)) return { ok: false, reason: 'Terrain too steep or too low' };
@@ -285,7 +306,7 @@ export class Sim {
     if (!chk.ok) return chk;
     this.spend(lot.cost);
     const [fw, fd] = this.lotFootprint(lot, facing);
-    const zone = lot.arch === 'house' ? Z.RL : lot.arch === 'apt' ? Z.RH : lot.arch === 'shop' ? Z.CL : lot.arch === 'office' ? Z.CH : Z.IN;
+    const zone = lot.zone || Z.RL;
     const b = this.addBuilding({ kind: 'zone', arch: lot.arch, zone, style: style === 5 ? (this.rng() * 5) | 0 : style, level: lot.level, lw: lot.lw, ld: lot.ld, x, z, w: fw, d: fd, facing, timer: 4 + lot.level });
     this.candRev = -1;
     return { ok: true, b };
@@ -374,11 +395,12 @@ export class Sim {
   assignCapacity(b) {
     const info = b.ginfo || {};
     if (b.kind === 'zone') {
-      const A = ARCH_INFO[b.arch];
+      const A = ARCH_INFO[b.arch] || ARCH_INFO.house;
       const floors = b.floors || info.floors || 2;
       b.floors = floors;
-      if (A.res) b.cap = Math.max(2, Math.round(b.lw * b.ld * floors * A.res * (b.level === 3 ? 1.1 : 1)));
-      if (A.jobs) b.jobs = Math.max(2, Math.round(b.lw * b.ld * floors * A.jobs * 0.55));
+      const fl = A.res && A.jobs ? Math.max(1, floors - 1) : floors;
+      if (A.res) b.cap = Math.max(2, Math.round(b.lw * b.ld * fl * A.res * (b.level === 3 ? 1.1 : 1)));
+      if (A.jobs) b.jobs = Math.max(2, Math.round(b.lw * b.ld * (A.res ? 1 : floors) * A.jobs * 0.55 * (IND_ARCH.has(b.arch) && b.arch !== 'factory' ? 1.6 : 1)));
     } else if (b.def) {
       b.jobs = b.def.jobs || 0;
       b.cap = b.def.cap || 0;
@@ -492,6 +514,7 @@ export class Sim {
     // construction progress is day based; coverage maps refresh occasionally
     this.mapsTimer -= dt;
     if (this.mapsDirty && this.mapsTimer <= 0) { this.mapsTimer = 0.8; this.updateMaps(); }
+    this.disasterUpdate(dt);
     if (this.G.world.rev !== this.netRev && this.mapsTimer <= 0.4) this.computeNetworks();
   }
 
@@ -507,9 +530,14 @@ export class Sim {
     this.updateEconomyStats();
     this.updateDemand();
     this.growth();
+    if (S.weatherOn !== false) weatherStep(S, this.rng); else if (S.weather) { S.weather.type = 'clear'; S.weather.snowCover = 0; }
     this.events();
     this.eventStep();
     this.industryStep();
+    this.deathStep();
+    if (S.totalDays % 5 === 0) this.depleteResources();
+    this.disasterStep();
+    this.chirpStep();
     this.applyFinance();
     this.checkMilestones();
     if (S.totalDays % 3 === 0) this.updateMaps(true);
@@ -532,13 +560,14 @@ export class Sim {
     const S = this.S;
     let psup = 0, pdem = 0, wsup = 0, wdem = 0, ssup = 0;
     const day = Math.max(0, Math.sin(((S.tod - 6) / 12) * Math.PI));
-    const wind = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(S.totalDays * 0.37 + 1.3));
+    const wfx = weatherFx(S);
+    const wind = (0.55 + 0.45 * (0.5 + 0.5 * Math.sin(S.totalDays * 0.37 + 1.3))) * wfx.wind;
     const list = [];
     for (const b of this.blist()) {
       if (b.state !== 'ok') continue;
       const d = b.def;
       if (d) {
-        if (d.power > 0 && this.connected(b, this.pw)) { let p = d.power; if (b.key === 'wind') p *= wind; if (b.key === 'solar') p *= clamp(day * 1.2, 0, 1); psup += p; }
+        if (d.power > 0 && this.connected(b, this.pw)) { let p = d.power; if (b.key === 'wind') p *= wind; if (b.key === 'solar') p *= clamp(day * 1.2, 0, 1) * wfx.solar; psup += p; }
         if (d.water && this.connected(b, this.wt)) wsup += d.water;
         if (d.sewage && this.connected(b, this.sw)) ssup += d.sewage;
         b.cPw = this.connected(b, this.pw) || d.power > 0; b.cWt = this.connected(b, this.wt) || !!d.water;
@@ -546,14 +575,14 @@ export class Sim {
       b.cSw = this.connected(b, this.sw);
       const A = b.kind === 'zone' ? ARCH_INFO[b.arch] : null;
       let pd, wd;
-      if (A) { pd = (b.occ * A.power + (A.jobs ? b.jobs * A.power : 0)) * (A.res ? 1 : 1); wd = A.res ? b.occ * A.water : b.workers * A.water; }
+      if (A) { pd = b.occ * A.power + (A.jobs ? b.jobs * A.power : 0); wd = (A.res ? b.occ * A.water : 0) + (A.jobs ? b.workers * A.water : 0); }
       else { pd = 0.02 + (b.jobs || 0) * 0.004 + (b.def && (b.def.industry ? 0.15 : 0.03)); wd = (b.jobs || 0) * 0.8 + 2; if (b.def && b.def.power > 0) { pd = 0; } }
       b._pd = pd; b._wd = wd;
       if (b.cPw) pdem += pd;
       if (b.cWt) wdem += wd;
       list.push(b);
     }
-    psup *= this.evMul('powerSupply'); pdem *= this.evMul('power'); wsup *= this.evMul('water');
+    psup *= this.evMul('powerSupply'); pdem *= this.evMul('power') * heatingDemand(S); wsup *= this.evMul('water');
     S.power.supply = psup; S.power.demand = pdem;
     S.water.supply = wsup; S.water.demand = wdem;
     S.sewage.cap = ssup; S.sewage.demand = wdem * 0.85;
@@ -573,13 +602,15 @@ export class Sim {
 
   updateEconomyStats() {
     const S = this.S;
-    let pop = 0, resCap = 0, jobsC = 0, jobsI = 0, jobsS = 0, skilled = 0, wprod = 0, wcap = 0, wcapProd = 0, tour = 0;
-    let filled = 0;
+    let pop = 0, resCap = 0, jobsC = 0, jobsI = 0, jobsS = 0, jobsO = 0, skilled = 0, tour = 0;
     for (const b of this.blist()) {
       if (b.state !== 'ok') { continue; }
       if (b.kind === 'zone') {
-        if (b.arch === 'house' || b.arch === 'apt') { pop += b.occ; resCap += b.cap; }
-        else if (b.arch === 'factory') jobsI += b.jobs; else { jobsC += b.jobs; if (b.arch === 'office') skilled += b.jobs; }
+        if (RES_ARCH.has(b.arch)) { pop += b.occ; resCap += b.cap; }
+        if (IND_ARCH.has(b.arch)) jobsI += b.jobs;
+        else if (b.arch === 'office') { jobsO += b.jobs; skilled += b.jobs; }
+        else if (b.jobs) jobsC += b.jobs;
+        if (b.arch === 'store' && b.level >= 2) tour += 0.08 * b.level;
       } else if (b.def) {
         if (b.def.industry) jobsI += b.def.jobs || 0; else jobsS += b.def.jobs || 0;
         if (b.key === 'tech') skilled += b.def.jobs;
@@ -588,8 +619,8 @@ export class Sim {
     }
     S.pop = Math.min(pop, POP_CAP);
     S.popPeak = Math.max(S.popPeak || 0, S.pop);
-    S.resCap = resCap; S.jobsC = jobsC; S.jobsI = jobsI; S.jobsS = jobsS;
-    S.jobsTotal = jobsC + jobsI + jobsS;
+    S.resCap = resCap; S.jobsC = jobsC; S.jobsI = jobsI; S.jobsS = jobsS; S.jobsO = jobsO;
+    S.jobsTotal = jobsC + jobsI + jobsS + jobsO;
     S.workforce = S.pop * 0.58;
     S.unemployment = S.workforce > 5 ? clamp(1 - Math.min(1, S.jobsTotal / S.workforce), 0, 1) : 0;
     this.jobFill = S.jobsTotal > 0 ? Math.min(1, S.workforce / S.jobsTotal) : 0;
@@ -599,9 +630,9 @@ export class Sim {
     let hNum = 0;
     const n = this.w.n;
     for (const b of this.blist()) {
-      if (b.state !== 'ok' || b.kind !== 'zone' || !(b.arch === 'house' || b.arch === 'apt')) continue;
+      if (b.state !== 'ok' || b.kind !== 'zone' || !RES_ARCH.has(b.arch)) continue;
       const i = (b.z + (b.d >> 1)) * n + b.x + (b.w >> 1);
-      eduNum += b.occ * m[i]; hNum += b.occ * h[i];
+      eduNum += b.occ * clamp(m[i] + this.dVal(i, 'edu'), 0, 1); hNum += b.occ * h[i];
     }
     const eduCap = this.eduCapRatio || 1, hCapR = this.healthCapRatio || 1;
     S.edu = S.pop > 0 ? clamp(eduNum / S.pop * eduCap + this.lawVal('edu'), 0, 1) : 0;
@@ -611,7 +642,7 @@ export class Sim {
     // tourism
     let sceneryBonus = 0;
     for (const b of this.blist()) if (b.state === 'ok' && b.kind === 'zone' && (b.style === 0 || b.style === 1) && b.level >= 2) sceneryBonus += 0.01;
-    S.tourism = Math.max(0, (tour * (1 + this.lawVal('tourism') + (S.policies.tourboard ? 0.3 : 0)) + Math.min(1.5, sceneryBonus * (1 + this.lawVal('landValue') * 3))) * (this.S.happy > 55 ? 1 : 0.6) + this.evSum('tourism'));
+    S.tourism = Math.max(0, weatherFx(S).tourism * (tour * (1 + this.lawVal('tourism') + (S.policies.tourboard ? 0.3 : 0)) + Math.min(1.5, sceneryBonus * (1 + this.lawVal('landValue') * 3))) * (this.S.happy > 55 ? 1 : 0.6) + this.evSum('tourism'));
     // job fill applied
     for (const b of this.blist()) {
       if (b.state !== 'ok') continue;
@@ -623,8 +654,10 @@ export class Sim {
       const edgeIdx = [k, (n - 1) * n + k, k * n, k * n + n - 1];
       for (const e of edgeIdx) if (this.w.road[e] === R.HIGHWAY || this.w.road[e] === R.RAIL) out = true;
     }
-    for (const b of this.blist()) if (b.key === 'port' && b.state === 'ok') out = true;
+    for (const b of this.blist()) if ((b.key === 'port' || b.key === 'airport') && b.state === 'ok') out = true;
     S.outside = out;
+    S.airport = false; S.cargoRail = 0;
+    for (const b of this.blist()) { if (b.state !== 'ok') continue; if (b.key === 'airport') S.airport = true; if (b.key === 'cargo_rail') S.cargoRail++; }
   }
 
   attractOf(hp) {
@@ -642,16 +675,19 @@ export class Sim {
     const jobsBal = (S.jobsTotal - S.workforce) / (S.jobsTotal + 60);
     let r = 0.12 + jobsBal * 0.8 + (happy - 50) * 0.01 - taxPenalty(S.tax.r) + this.lawVal('growth') + (fill / Math.max(0.25, attract) - 0.92) * 2.2;
     if (S.resCap < 40) r = Math.max(r, 0.7);
-    const ctarget = pop * 0.2 + 12 + S.tourism * 40;
+    const ctarget = pop * 0.17 + 12 + S.tourism * 40 + (S.airport ? pop * 0.02 : 0);
     let c = (ctarget - S.jobsC) / (ctarget + 30) * 1.15 - taxPenalty(S.tax.c) - (S.pop > 30 ? 0 : 0.8) - (S.outside ? 0 : 0.04);
-    const itarget = pop * 0.22 + 14 + (S.outside ? pop * 0.04 : 0) + (S.unemployment > 0.1 ? 40 : 0);
+    const otarget = pop * 0.1 * (0.35 + S.edu) + 8 + (this.teleAvg || 0) * pop * 0.03;
+    let o = (otarget - S.jobsO) / (otarget + 30) * 1.1 - taxPenalty(S.tax.o === undefined ? 9 : S.tax.o) - (S.pop > 500 ? 0 : 0.6);
+    const itarget = pop * 0.17 + 14 + (S.outside ? pop * 0.04 : 0) + (S.unemployment > 0.1 ? 40 : 0) + S.cargoRail * pop * 0.015;
     let i = (itarget - S.jobsI) / (itarget + 30) * 1.1 - taxPenalty(S.tax.i) + (S.policies.freetrade ? 0.12 : 0) + 0.08;
-    if (S.pop < 15) { c = Math.min(c, 0.0); i = Math.min(i, 0.4); }
+    if (S.pop < 15) { c = Math.min(c, 0.0); i = Math.min(i, 0.4); o = Math.min(o, 0); }
     if (S.pop >= POP_CAP) r = Math.min(r, -0.5);
     const e = 0.25;
     S.demand.r = lerp(S.demand.r, clamp(r, -1, 1), e);
     S.demand.c = lerp(S.demand.c, clamp(c, -1, 1), e);
     S.demand.i = lerp(S.demand.i, clamp(i, -1, 1), e);
+    S.demand.o = lerp(S.demand.o || 0, clamp(o, -1, 1), e);
   }
 
   // ------------------------------------------------------------ growth
@@ -661,7 +697,7 @@ export class Sim {
     for (let z = 0; z < n; z++) for (let x = 0; x < n; x++) {
       const i = z * n + x;
       const zt = w.zone[i];
-      if (!zt || zt > 5 || w.bid[i] || w.road[i]) continue;
+      if (!isBuildZone(zt) || w.bid[i] || w.road[i]) continue;
       const f = w.frontRoad(x, z);
       if (f < 0) continue;
       c.push(i);
@@ -674,7 +710,7 @@ export class Sim {
     if (this.candRev !== w.rev) this.rebuildCandidates();
     if (!this.cands.length) return;
     const nAttempt = 1 + Math.floor(S.pop / 350);
-    const cats = [['R', S.demand.r], ['C', S.demand.c], ['I', S.demand.i]];
+    const cats = [['R', S.demand.r], ['C', S.demand.c], ['O', S.demand.o || 0], ['I', S.demand.i]];
     const popRoom = S.resCap < POP_CAP * 1.08;
     for (const [cat, dem] of cats) {
       if (dem < 0.04) continue;
@@ -692,16 +728,16 @@ export class Sim {
       // occupancy dynamics
       this.occupancy(b, i);
       // abandonment
-      const bad = !b.powered || !b.watered || this.maps.happy[i] < 8;
+      const bad = !b.powered || !b.watered || this.maps.happy[i] < 8 || ((b.arch === 'ore' || b.arch === 'oil') && b.resLeft === 0);
       if (bad && b.age > 6) b.abandon++; else b.abandon = Math.max(0, b.abandon - 2);
       if (b.abandon > 14) { this.abandon(b); continue; }
-      if (b.level < 3 && b.age > 18 && this.rng() < 0.03) this.tryUpgrade(b, i);
+      if (b.level < 3 && b.age > 18 && this.rng() < 0.03 && b.level < (this.dVal(i, 'maxLevel') || 3)) this.tryUpgrade(b, i);
     }
   }
 
   occupancy(b, i) {
     const S = this.S;
-    if (b.arch === 'house' || b.arch === 'apt') {
+    if (RES_ARCH.has(b.arch)) {
       let attract = this.attractOf(this.maps.happy[i]);
       if (!b.powered || !b.watered) attract = Math.min(attract, 0.15);
       if (S.pop >= POP_CAP) attract = Math.min(attract, b.occ / Math.max(1, b.cap));
@@ -729,19 +765,35 @@ export class Sim {
     if (!b.powered || !b.watered) return;
     const lv = m.landvalue[i];
     let ok = false;
-    if (b.level === 1) ok = lv >= 36 && (b.arch === 'factory' || m.edu[i] > 0.08 || S.pop < 400) && (b.arch === 'factory' ? true : m.police[i] > 0.05 || S.pop < 300);
-    else ok = lv >= 58 && m.edu[i] > 0.3 && m.health[i] > 0.2 && m.police[i] > 0.2 && (b.arch === 'house' || b.arch === 'apt' || S.pop > 2500);
-    if (b.arch === 'factory' && b.level >= 2) ok = ok && S.pop > 3500 && this.skillFill > 0.5;
+    if (b.level === 1) ok = lv >= 30 && (IND_ARCH.has(b.arch) || m.edu[i] > 0.05 || S.pop < 400) && (IND_ARCH.has(b.arch) ? true : m.police[i] > 0.04 || S.pop < 300);
+    else ok = lv >= 48 && m.edu[i] > 0.22 && m.health[i] > 0.15 && m.police[i] > 0.15 && (RES_ARCH.has(b.arch) || S.pop > 2500);
+    if (IND_ARCH.has(b.arch) && b.level >= 2) ok = ok && S.pop > 3500 && this.skillFill > 0.5;
+    if (b.arch === 'office' && b.level >= 2) ok = ok && m.tele[i] > 0.1;
     if (!ok) return;
-    const dem = b.arch === 'house' || b.arch === 'apt' ? S.demand.r : b.arch === 'factory' ? S.demand.i : S.demand.c;
+    const dem = RES_ARCH.has(b.arch) ? S.demand.r : IND_ARCH.has(b.arch) ? S.demand.i : b.arch === 'office' ? (S.demand.o || 0) : S.demand.c;
     if (dem < 0.02 && b.level >= 2) return;
-    if (S.pop >= POP_CAP && (b.arch === 'house' || b.arch === 'apt')) return;
+    if (S.pop >= POP_CAP && RES_ARCH.has(b.arch)) return;
     if (this.law.growth < -0.05 && this.rng() < 0.5) return;
     const occ = b.occ;
     b.level++; b.state = 'construct'; b.timer = 4 + b.level; b.occ = Math.round(occ * 0.5);
     b.seed = (this.rng() * 1e9) | 0;
     if (this.G.view) this.G.view.syncBuilding(b, true);
-    if (b.arch === 'house' || b.arch === 'apt') this.S.pop = Math.max(0, this.S.pop - (occ - b.occ));
+    if (RES_ARCH.has(b.arch)) this.S.pop = Math.max(0, this.S.pop - (occ - b.occ));
+  }
+
+  /** why a building isn't levelling up (for the info panel) */
+  upgradeNeeds(b) {
+    const S = this.S, m = this.maps, n = this.w.n;
+    if (b.kind !== 'zone' || b.level >= 3) return [];
+    const i = (b.z + (b.d >> 1)) * n + b.x + (b.w >> 1);
+    const out = [];
+    const cap = this.dVal(i, 'maxLevel'); if (cap && b.level >= cap) out.push('District High-Rise Ban');
+    if (!b.powered) out.push('power'); if (!b.watered) out.push('water');
+    const lvNeed = b.level === 1 ? 30 : 48;
+    if (m.landvalue[i] < lvNeed) out.push(`land value ${Math.round(m.landvalue[i])}/${lvNeed}`);
+    if (b.level === 1) { if (!IND_ARCH.has(b.arch) && m.edu[i] <= 0.05 && S.pop >= 400) out.push('schools'); if (!IND_ARCH.has(b.arch) && m.police[i] <= 0.04 && S.pop >= 300) out.push('police'); }
+    else { if (m.edu[i] <= 0.22) out.push('education'); if (m.health[i] <= 0.15) out.push('healthcare'); if (m.police[i] <= 0.15) out.push('police'); if (b.arch === 'office' && m.tele[i] <= 0.1) out.push('telecom'); }
+    return out;
   }
 
   trySpawn(cat) {
@@ -751,8 +803,15 @@ export class Sim {
     if (w.bid[idx] || w.road[idx]) return false;
     const zt = w.zone[idx];
     const zi = ZONE_INFO[zt];
-    if (!zi || zi.cat !== cat) return false;
-    const arch = zi.arch;
+    if (!zi || zi.cat !== cat || !zi.arch) return false;
+    let arch = zi.arch;
+    // district specialisation / small-business policy
+    const spec = this.dfx && w.dist[idx] && this.dfx[w.dist[idx]] ? this.dfx[w.dist[idx]].spec : null;
+    if (arch === 'factory' && spec) {
+      const rv = this.resourceAt(idx, SPECIALIZATIONS[spec].res);
+      if (rv > 40) arch = spec;
+    }
+    if (arch === 'store' && this.dVal(idx, 'smallbiz')) arch = 'shop';
     // power & water access: a connected conductor must be nearby (so buildings only appear where services reach)
     const f = w.frontRoad(x, z);
     if (f < 0) return false;
@@ -786,7 +845,7 @@ export class Sim {
       if (!ok) continue;
       let minx = 1e9, minz = 1e9, maxx = -1, maxz = -1;
       for (const [tx, tz] of tiles) { minx = Math.min(minx, tx); minz = Math.min(minz, tz); maxx = Math.max(maxx, tx); maxz = Math.max(maxz, tz); }
-      const level = (cat === 'R' ? this.maps.landvalue[idx] > 50 : this.maps.landvalue[idx] > 55) && this.rng() < 0.3 ? 2 : 1;
+      const level = (cat === 'R' ? this.maps.landvalue[idx] > 50 : this.maps.landvalue[idx] > 55) && this.rng() < 0.3 && !(this.dVal(idx, 'maxLevel') === 1) ? 2 : 1;
       const style = style0 === 5 ? (this.rng() * 5) | 0 : style0;
       this.addBuilding({ kind: 'zone', arch, zone: zt, style, level, lw, ld, x: minx, z: minz, w: maxx - minx + 1, d: maxz - minz + 1, facing: f, timer: 4 + level });
       this.candRev = -1;
@@ -801,7 +860,8 @@ export class Sim {
     this.mapsDirty = false;
     if (this.netRev !== w.rev) this.computeNetworks();
     const clear = (a) => a.fill(0);
-    for (const k of ['police', 'fire', 'health', 'edu', 'waste', 'transit', 'pollution', 'noise', 'park']) clear(m[k]);
+    for (const k of ['police', 'fire', 'health', 'edu', 'waste', 'transit', 'pollution', 'noise', 'park', 'death', 'post', 'tele', 'shelter', 'dru']) clear(m[k]);
+    this.recomputeDistrictFx();
     // capacities for ratios
     let eduCap = 0, healthCap = 0, wasteCap = 0, wasteProd = 0, policeN = 0;
     let prisonCap = 0;
@@ -830,15 +890,16 @@ export class Sim {
         map[z * n + x] += strength * Math.pow(1 - Math.sqrt(d2) / r, pow);
       }
     };
-    const covList = { edu: [], health: [], police: [], fire: [], waste: [], transit: [] };
+    const lineStops = new Set();
+    for (const l of S.lines || []) if (l.stops.length >= 2) for (const k of l.stops) lineStops.add(l.type === 'bus' ? 'b' + k : 'm' + k);
     for (const b of this.blist()) {
       if (b.state !== 'ok' || !b.def) continue;
       const d = b.def;
       const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
-      const operating = b.powered || d.power > 0 || b.key === 'bus_stop' || !this.pw[0] && false;
       if (d.cov && d.radius && (b.powered || b.key === 'bus_stop')) {
-        const cat = d.cat;
-        const bf = bud(cat === 'education' ? 'education' : cat);
+        // transit stops only cover when a line serves them
+        if (b.key === 'bus_stop' || b.key === 'metro') { const k = b.key === 'bus_stop' ? 'b' + (b.z * n + b.x) : 'm' + b.id; if (!lineStops.has(k)) continue; }
+        const bf = 0.55 + 0.45 * this.budgetOf(d);
         stamp(m[d.cov], cx, cz, d.radius, bf, 0.55);
         if (d.cov === 'edu') eduCap += d.cap * bf;
         if (d.cov === 'health') healthCap += d.cap * bf;
@@ -851,15 +912,19 @@ export class Sim {
       if (d.radius && (d.happy || d.lv)) { stamp(m.park, cx, cz, d.radius, d.happy || 3, 1); }
     }
     // zone buildings: industry pollution/noise
+    const IP = { factory: [0.8, 0.6, 0.5, 0.3], agri: [0.15, 0.05, 0.2, 0.05], forest: [0.5, 0.2, 0.6, 0.2], ore: [1.2, 0.5, 0.9, 0.3], oil: [1.3, 0.5, 0.6, 0.2] };
     for (const b of this.blist()) {
       if (b.kind !== 'zone' || b.state !== 'ok') continue;
       const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
-      if (b.arch === 'factory') {
-        add(m.pollution, cx, cz, 6 + b.level * 2, (0.8 + b.level * 0.6) * 22 * (1 + this.lawVal('pollution')), 1.5);
-        add(m.noise, cx, cz, 5 + b.level, (0.5 + b.level * 0.3) * 24 * (1 + this.lawVal('noise')), 1.5);
+      const ip = IP[b.arch];
+      if (ip) {
+        add(m.pollution, cx, cz, 6 + b.level * 2, (ip[0] + b.level * ip[1]) * 22 * (1 + this.lawVal('pollution')), 1.5);
+        add(m.noise, cx, cz, 5 + b.level, (ip[2] + b.level * ip[3]) * 24 * (1 + this.lawVal('noise')), 1.5);
       } else if (b.arch === 'office' && b.level === 3) add(m.noise, cx, cz, 3, 6, 1);
-      else if (b.arch === 'shop') add(m.noise, cx, cz, 3, 5, 1);
+      else if (b.arch === 'shop' || b.arch === 'mixed') add(m.noise, cx, cz, 3, 5, 1);
+      else if (b.arch === 'store') add(m.noise, cx, cz, 4, 8, 1);
     }
+    this.stampLineCoverage(stamp);
     // parks painted + traffic
     const traffic = this.G.traffic ? this.G.traffic.map : null;
     let trSum = 0, trN = 0;
@@ -873,14 +938,18 @@ export class Sim {
       }
     }
     S.traffic = trN ? clamp(trSum / trN, 0, 2) : 0;
-    // trees & parks soften pollution
-    for (let i = 0; i < N; i++) { if (w.tree[i] || w.park[i]) { m.pollution[i] *= 0.65; m.noise[i] *= 0.75; } m.pollution[i] = Math.min(100, m.pollution[i]); m.noise[i] = Math.min(100, m.noise[i]); }
+    // trees & parks soften pollution; district policies scale it
+    for (let i = 0; i < N; i++) {
+      if (w.tree[i] || w.park[i]) { m.pollution[i] *= 0.65; m.noise[i] *= 0.75; }
+      if (w.dist[i]) { m.pollution[i] *= 1 + this.dVal(i, 'pollution'); m.noise[i] *= 1 + this.dVal(i, 'noise'); }
+      m.pollution[i] = Math.min(100, m.pollution[i]); m.noise[i] = Math.min(100, m.noise[i]);
+    }
     // capacity ratios
     const pop = Math.max(1, S.pop);
     this.eduCapRatio = clamp(eduCap / (pop * 0.22 + 1), 0, 1) ;
     this.healthCapRatio = clamp(healthCap / (pop * 0.3 + 1), 0, 1);
     // waste production
-    for (const b of this.blist()) { if (b.state !== 'ok') continue; const A = b.kind === 'zone' ? ARCH_INFO[b.arch] : null; wasteProd += A ? (b.occ + b.workers) * A.waste * (1 + b.level * 0.15) : (b.jobs || 0) * 0.02; }
+    for (const b of this.blist()) { if (b.state !== 'ok') continue; const A = b.kind === 'zone' ? ARCH_INFO[b.arch] : null; const dw = 1 + this.dVal((b.z + (b.d >> 1)) * n + b.x + (b.w >> 1), 'waste'); wasteProd += (A ? (b.occ + b.workers) * A.waste * (1 + b.level * 0.15) : (b.jobs || 0) * 0.02) * dw; }
     wasteProd *= (1 + this.lawVal('waste'));
     S.waste.cap = wasteCap; S.waste.prod = wasteProd;
     this.wasteRatio = wasteProd > 0 ? clamp(wasteCap / wasteProd, 0, 1) : 1;
@@ -903,7 +972,7 @@ export class Sim {
     // land value
     const lv = m.landvalue;
     const heritageBonus = this.lawVal('landValue');
-    for (let i = 0; i < N; i++) lv[i] = 28 + this.waterNear[i] * 12 + (w.tree[i] ? 3 : 0);
+    for (let i = 0; i < N; i++) lv[i] = 28 + this.waterNear[i] * 12 + (w.tree[i] ? 3 : 0) + m.tele[i] * 4 + m.post[i] * 2 + this.dVal(i, 'landValue');
     for (const b of this.blist()) {
       if (b.state !== 'ok') continue;
       if (b.def && b.def.lv) add(lv, b.x + b.w / 2, b.z + b.d / 2, b.def.radius || 10, b.def.lv * 100, 1);
@@ -922,17 +991,21 @@ export class Sim {
     const crimeMul = 1 + this.lawVal('crime');
     let casino = 0; for (const b of this.blist()) if (b.key === 'casino' && b.state === 'ok') casino += 1;
     for (let i = 0; i < N; i++) {
-      const base = (14 + (100 - lv[i]) * 0.34 + unemp * 38) * crimeMul;
+      const base = (14 + (100 - lv[i]) * 0.34 + unemp * 38) * crimeMul * (1 + this.dVal(i, 'crime'));
       cr[i] = clamp(base * (1 - m.police[i] * 0.85), 0, 100);
     }
     for (const b of this.blist()) if (b.state === 'ok' && b.def && b.def.crime) add(cr, b.x + b.w / 2, b.z + b.d / 2, 8, b.def.crime * 12 * (1 - 0.6 * m.police[(b.z) * n + b.x]), 1);
-    for (let i = 0; i < N; i++) { cr[i] = clamp(cr[i], 0, 100); lv[i] = clamp(lv[i] - m.pollution[i] * 0.35 - m.noise[i] * 0.18 - cr[i] * 0.2 + m.police[i] * 4 + m.fire[i] * 2 + m.health[i] * 3 + m.edu[i] * 5, 0, 100); }
+    for (let i = 0; i < N; i++) { cr[i] = clamp(cr[i], 0, 100); lv[i] = clamp(lv[i] - m.pollution[i] * 0.35 - m.noise[i] * 0.18 - cr[i] * 0.15 + m.police[i] * 6 + m.fire[i] * 3 + m.health[i] * 5 + m.edu[i] * 6 + m.transit[i] * 4, 0, 100); }
+    // averages used by demand/finance
+    let ts = 0, ps = 0, rc2 = 0;
+    for (const b of this.blist()) { if (b.state !== 'ok' || b.kind !== 'zone') continue; const i = (b.z + (b.d >> 1)) * n + b.x + (b.w >> 1); ts += m.tele[i]; ps += m.post[i]; rc2++; }
+    this.teleAvg = rc2 ? ts / rc2 : 0; this.postAvg = rc2 ? ps / rc2 : 0;
     // happiness (tile + city)
     this.computeHappiness();
     // stats
     let crAvg = 0, plAvg = 0, nzAvg = 0, rc = 0;
     for (const b of this.blist()) {
-      if (b.state !== 'ok' || b.kind !== 'zone' || !(b.arch === 'house' || b.arch === 'apt')) continue;
+      if (b.state !== 'ok' || b.kind !== 'zone' || !RES_ARCH.has(b.arch)) continue;
       const i = (b.z + (b.d >> 1)) * n + b.x + (b.w >> 1);
       crAvg += cr[i] * b.occ; plAvg += m.pollution[i] * b.occ; nzAvg += m.noise[i] * b.occ; rc += b.occ;
     }
@@ -970,14 +1043,16 @@ export class Sim {
     const sizeK = clamp(S.pop / 400, 0.12, 1);          // small villages are forgiving about missing services
     const gSew = S.sewage.demand > 0 ? (1 - Math.min(1, S.sewage.cap / S.sewage.demand)) * -10 * sizeK : 0;
     const gTraffic = -Math.max(0, S.traffic - 0.35) * 14;
-    const gLaw = this.lawVal('happy') + this.evSum('happy');
+    const gLaw = this.lawVal('happy') + this.evSum('happy') + weatherFx(S).happy;
     const gWaste = -(1 - (this.wasteRatio === undefined ? 1 : this.wasteRatio)) * 8 * sizeK - Math.min(10, S.waste.backlog / 150) * sizeK;
     const gHeritage = S.tourism * 1.5;
-    const gShortage = 0;
-    const gAll = gTax + gJobs + gPower + gWater + gSew + gTraffic + gLaw + gWaste + Math.min(4, gHeritage);
+    const gDeath = -Math.min(10, (S.death ? S.death.backlog : 0) / 8) * sizeK;
+    const fees = S.fees || { power: 100, water: 100 };
+    const gFees = -((fees.power - 100) + (fees.water - 100)) * 0.035;
+    const gAll = gTax + gJobs + gPower + gWater + gSew + gTraffic + gLaw + gWaste + gDeath + gFees + Math.min(4, gHeritage);
     const hp = m.happy;
     for (let i = 0; i < N; i++) {
-      let v = 52 + gAll + m.police[i] * 8 + m.fire[i] * 6 + m.health[i] * 11 + m.edu[i] * 7 + m.waste[i] * 3 + Math.min(14, m.park[i] * 1.6)
+      let v = 52 + gAll + m.police[i] * 8 + m.fire[i] * 6 + m.health[i] * 11 + m.edu[i] * 7 + m.waste[i] * 3 + Math.min(14, m.park[i] * 1.6) + m.post[i] * 2 + m.tele[i] * 2 + m.transit[i] * 2 + (w.dist[i] ? this.dVal(i, 'happy') : 0) + (S.pop > 400 ? m.death[i] * 2 : 0)
         - m.pollution[i] * 0.2 - m.noise[i] * 0.1 - m.crime[i] * 0.1 * sizeK - m.crime[i] * 0.04 + (m.landvalue[i] - 40) * 0.08 + this.waterNear[i] * 3;
       hp[i] = clamp(v, 0, 100);
     }
@@ -985,7 +1060,7 @@ export class Sim {
     let sum = 0, pop = 0;
     let hs = 0, es = 0, ps = 0, fs = 0, ws = 0;
     for (const b of this.blist()) {
-      if (b.state !== 'ok' || b.kind !== 'zone' || !(b.arch === 'house' || b.arch === 'apt')) continue;
+      if (b.state !== 'ok' || b.kind !== 'zone' || !RES_ARCH.has(b.arch)) continue;
       const i = (b.z + (b.d >> 1)) * n + b.x + (b.w >> 1);
       sum += hp[i] * b.occ; pop += b.occ;
       hs += m.health[i] * b.occ; es += m.edu[i] * b.occ; ps += m.police[i] * b.occ; fs += m.fire[i] * b.occ; ws += m.waste[i] * b.occ;
@@ -995,13 +1070,14 @@ export class Sim {
     const avg = (v) => pop ? v / pop : 0;
     S.happyParts = [
       ['Health care', avg(hs) * 11], ['Education', avg(es) * 7], ['Police', avg(ps) * 8], ['Fire safety', avg(fs) * 6], ['Waste', gWaste + avg(ws) * 3],
-      ['Parks & scenery', Math.min(14, this.avgPark())], ['Taxes', gTax], ['Jobs', gJobs], ['Power & water', gPower + gWater + gSew], ['Traffic', gTraffic],
-      ['Pollution', -S.pollution * 0.2], ['Noise', -S.noise * 0.1], ['Crime', -S.crime * (0.1 * sizeK + 0.04)], ['Laws', gLaw],
+      ['Parks & scenery', Math.min(14, this.avgPark())], ['Taxes & fees', gTax + gFees], ['Jobs', gJobs], ['Power & water', gPower + gWater + gSew], ['Traffic', gTraffic],
+      ['Pollution', -S.pollution * 0.2], ['Noise', -S.noise * 0.1], ['Crime', -S.crime * (0.1 * sizeK + 0.04)], ['Laws & weather', gLaw],
+      ['Deathcare', gDeath], ['Post & telecom', (this.postAvg || 0) * 2 + (this.teleAvg || 0) * 2],
     ];
   }
   avgPark() {
     const m = this.maps, w = this.w, n = w.n; let s = 0, c = 0;
-    for (const b of this.blist()) { if (b.state === 'ok' && b.kind === 'zone' && b.occ > 0 && (b.arch === 'house' || b.arch === 'apt')) { s += m.park[(b.z + (b.d >> 1)) * n + b.x + (b.w >> 1)] * 1.6; c++; } }
+    for (const b of this.blist()) { if (b.state === 'ok' && b.kind === 'zone' && b.occ > 0 && RES_ARCH.has(b.arch)) { s += m.park[(b.z + (b.d >> 1)) * n + b.x + (b.w >> 1)] * 1.6; c++; } }
     return c ? s / c : 0;
   }
 
@@ -1020,14 +1096,16 @@ export class Sim {
     }
     // fires
     const fireMul = 1 + this.lawVal('fire');
+    const wfx = weatherFx(S);
     for (const b of this.blist()) {
       if (b.state === 'burning') { this.fireTick(b); continue; }
       if (b.state !== 'ok' || b.noBid || S.disasters === false) continue;
       const i = (b.z + (b.d >> 1)) * n + b.x + (b.w >> 1);
-      let base = b.kind === 'zone' ? (b.arch === 'factory' ? 0.00032 : 0.00009) : 0.00006 + (b.def && b.def.fire ? 0.0003 * b.def.fire : 0);
-      if (b.arch === 'factory') base *= (1 + this.lawVal('fireInd'));
+      let base = b.kind === 'zone' ? (IND_ARCH.has(b.arch) ? 0.00032 : 0.00009) : 0.00006 + (b.def && b.def.fire ? 0.0003 * b.def.fire : 0);
+      if (IND_ARCH.has(b.arch)) base *= (1 + this.lawVal('fireInd'));
+      base *= 1 + this.dVal(i, 'fire');
       if (!b.powered && b.kind === 'zone') base *= 0.2;
-      const p = base * fireMul * (1 - m.fire[i] * 0.72) * clamp(S.pop / 1500, 0.15, 1);
+      const p = base * fireMul * wfx.fire * (1 - m.fire[i] * 0.72) * clamp(S.pop / 1500, 0.15, 1);
       if (this.rng() < p) this.ignite(b);
     }
     // crime events
@@ -1043,7 +1121,7 @@ export class Sim {
     b.tintMul = [1.2, 0.6, 0.45];
     this.S.stats.fires++;
     if (this.G.view) { this.G.view.markChunk(b); this.G.view.setFire(b, true, Math.min(2, 0.6 + b.w * b.d / 8)); }
-    const def = b.def; const name = def ? def.name : (b.arch === 'factory' ? 'A factory' : b.arch === 'house' || b.arch === 'apt' ? 'A home' : 'A business');
+    const def = b.def; const name = def ? def.name : (IND_ARCH.has(b.arch) ? 'A factory' : RES_ARCH.has(b.arch) ? 'A home' : 'A business');
     this.log(`🔥 ${name} is on fire!`, 'bad');
     if (this.G.traffic) this.G.traffic.dispatchEmergency('fire', b);
   }
@@ -1163,27 +1241,38 @@ export class Sim {
   // ------------------------------------------------------------ finance
   computeFinance() {
     const S = this.S, w = this.w, n = w.n;
-    const inc = { Residential: 0, Commercial: 0, Industrial: 0, 'Special industries': 0, Tourism: 0, 'Fines & fees': 0, Recycling: 0, Transit: 0 };
-    const exp = { Roads: 0, Services: 0, Utilities: 0, Parks: 0, Laws: 0, Industries: 0, Loan: 0 };
+    const inc = { Residential: 0, Commercial: 0, Office: 0, Industrial: 0, 'Special industries': 0, Tourism: 0, 'Fines & fees': 0, Recycling: 0, Transit: 0 };
+    const exp = { Roads: 0, Services: 0, Utilities: 0, Parks: 0, 'Public transport': 0, Laws: 0, 'District policies': 0, Industries: 0, Loan: 0 };
     const hFactor = clamp(0.55 + S.happy / 120, 0.5, 1.1);
     const lvlW = [0, 0.8, 1.15, 1.7];
-    const taxR = S.tax.r / 9, taxC = S.tax.c / 9, taxI = S.tax.i / 9;
+    const taxR = S.tax.r / 9, taxC = S.tax.c / 9, taxI = S.tax.i / 9, taxO = (S.tax.o === undefined ? 9 : S.tax.o) / 9;
+    const IND_MUL = { factory: 1, agri: 0.9, forest: 1.05, ore: 1.25, oil: 1.6 };
+    const n2 = n, m = this.maps;
     let busStops = 0;
     for (const b of this.blist()) {
       if (b.state !== 'ok') continue;
       if (b.kind === 'zone') {
-        if (b.arch === 'house' || b.arch === 'apt') inc.Residential += b.occ * 4.2 * lvlW[b.level] * taxR * hFactor * (1 + this.lawVal('incomeRes'));
-        else if (b.arch === 'factory') inc.Industrial += b.workers * 5.6 * lvlW[b.level] * taxI * (b.powered ? 1 : 0.3) * (1 + this.lawVal('incomeInd'));
-        else inc.Commercial += b.workers * 6.2 * lvlW[b.level] * taxC * (b.powered ? 1 : 0.3) * (1 + this.lawVal('incomeCom')) * (b.arch === 'office' ? Math.max(0.5, this.skillFill) : 1) * (1 + S.tourism * 0.04) * (S.outside ? 1.08 : 1) * (1 - Math.max(0, S.traffic - 0.5) * 0.15);
+        const ti = (b.z + (b.d >> 1)) * n2 + b.x + (b.w >> 1);
+        const traffic = 1 - Math.max(0, S.traffic - 0.5) * 0.15;
+        if (RES_ARCH.has(b.arch)) inc.Residential += b.occ * 4.2 * lvlW[b.level] * taxR * hFactor * (1 + this.lawVal('incomeRes'));
+        if (IND_ARCH.has(b.arch)) {
+          const res = (b.arch === 'ore' || b.arch === 'oil') && b.resLeft === 0 ? 0.2 : 1;
+          inc.Industrial += b.workers * 5.6 * lvlW[b.level] * (IND_MUL[b.arch] || 1) * taxI * res * (b.powered ? 1 : 0.3) * (1 + this.lawVal('incomeInd') + this.dVal(ti, 'incomeInd')) * (1 + S.cargoRail * 0.06) * (this.dVal(ti, 'trucks') ? 0.92 : 1);
+        } else if (b.arch === 'office') {
+          inc.Office += b.workers * 6.8 * lvlW[b.level] * taxO * (b.powered ? 1 : 0.3) * Math.max(0.5, this.skillFill) * (1 + m.tele[ti] * 0.12 + this.dVal(ti, 'incomeOff')) * (S.outside ? 1.06 : 1) * traffic;
+        } else if (b.jobs) {
+          const small = b.arch === 'shop' && this.dVal(ti, 'smallbiz') ? 1.15 : 1;
+          inc.Commercial += b.workers * 6.2 * lvlW[b.level] * taxC * small * (b.powered ? 1 : 0.3) * (1 + this.lawVal('incomeCom') + this.dVal(ti, 'incomeCom')) * (1 + S.tourism * 0.04 + m.post[ti] * 0.05) * (S.outside ? 1.08 : 1) * (S.airport ? 1.05 : 1) * traffic;
+        }
       } else if (b.def) {
         const d = b.def;
         if (d.industry) inc['Special industries'] += b.rev || 0;
-        const budget = this.budgetScale(d.cat);
+        const budget = this.budgetOf(d);
         const up = d.upkeep * (b.powered || d.power ? 1 : 0.6);
         if (d.cat === 'power' || d.cat === 'water') exp.Utilities += up;
         else if (d.industry) exp.Industries += up;
         else if (d.cat === 'parks' || d.cat === 'landmarks') exp.Parks += up * budget;
-        else if (d.cat === 'civic') exp.Services += up;
+        else if (d.cat === 'transit') exp['Public transport'] += up * budget;
         else exp.Services += up * budget;
         if (d.income) inc.Recycling += d.income * (this.wasteRatio > 0 ? 1 : 0);
         if (d.tourism && !d.industry) inc.Tourism += d.tourism * 220 * (1 + this.lawVal('tourism'));
@@ -1201,7 +1290,11 @@ export class Sim {
     for (const id in S.policies) if (S.policies[id] && INDUSTRY_POLICIES[id]) exp.Industries += INDUSTRY_POLICIES[id].cost * 0.5;
     inc['Fines & fees'] += S.pop * 0.12 * this.lawVal('fines') * S.enforcement;
     const evInc = this.evMul('income'); if (evInc !== 1) { inc.Commercial *= evInc; inc.Industrial *= evInc; inc['Special industries'] *= evInc; }
-    inc.Transit = busStops * 90 * (this.law.cars ? 0.2 : 1);
+    inc.Transit = (S.transitFares || 0) + (S.airport ? 600 + S.pop * 0.05 : 0);
+    const fees = S.fees || { power: 100, water: 100 };
+    inc['Utility fees'] = (Math.min(S.power.demand, S.power.supply) * 30 * fees.power + Math.min(S.water.demand, S.water.supply) * 0.15 * fees.water) / 100;
+    exp['Public transport'] += this.lineUpkeep();
+    exp['District policies'] = this.districtPolicyCost();
     exp.Loan = S.loan * 0.012;
     const mul = 1 + this.lawVal('expenses');
     for (const k in exp) exp[k] *= mul;
@@ -1222,6 +1315,7 @@ export class Sim {
 
   monthStep() {
     const S = this.S;
+    this.transitStep();
     S.hist.push({ y: S.year, m: S.month, pop: S.pop, money: Math.round(S.money), happy: Math.round(S.happy), net: Math.round(S.fin.net), inc: Math.round(S.fin.inc), exp: Math.round(S.fin.exp), jobs: S.jobsTotal, unemp: S.unemployment, crime: S.crime, pollution: S.pollution, edu: S.edu });
     if (S.hist.length > 240) S.hist.shift();
     if (S.month === 0 && this.G.ui && this.G.ui.autosave) this.G.ui.autosave();
@@ -1238,7 +1332,7 @@ export class Sim {
       S.advisorCool[id] = S.totalDays; this.log(msg, type);
     };
     if (S.pop < 20 && S.totalDays > 12) {
-      let zoned = 0; for (let i = 0; i < this.w.zone.length; i++) if (this.w.zone[i] && this.w.zone[i] < 6) { zoned++; break; }
+      let zoned = 0; for (let i = 0; i < this.w.zone.length; i++) if (isBuildZone(this.w.zone[i])) { zoned++; break; }
       if (zoned && !(S.power.supply > 0)) warn('np', '⚡ Zones need power and water before buildings appear. Build a Wind Turbine or Coal Plant, a Water Pump, and connect them to your roads.', 'tip');
       else if (zoned && !(S.water.supply > 0)) warn('nw', '💧 Build a Water Pump on the shore (or a Water Tower) and connect it by road.', 'tip');
       else if (zoned) warn('nr', '🛣️ Zoned land must touch a road that is connected to your power and water.', 'tip');
@@ -1257,6 +1351,9 @@ export class Sim {
       if (!S.outside && S.pop > 800) warn('outside', '🛣️ Connect a highway or railway to the map edge (or build a port) to boost trade.', 'tip');
       if (S.fin.net < 0 && !this.sandbox() && S.pop > 100) warn('budget', '💸 The budget is running a deficit.');
       if (S.happy < 40) warn('happy', '😠 Citizens are unhappy. Check the happiness breakdown.');
+      if (S.pop > 900 && (S.demand.o || 0) > 0.3) warn('office', '🏙️ Businesses want office space. Zone some Office land.', 'tip');
+      if ((S.permits || 0) > 0 && !this.sandbox()) warn('permit', '🗺️ You can buy a new map area! Open Areas in the toolbar.', 'tip');
+      if (S.pop > 1500 && S.traffic > 0.6 && !(S.lines || []).length) warn('lines', '🚌 Traffic is heavy. Create bus or metro lines (Transport → Line tools).', 'tip');
     }
   }
 
@@ -1265,7 +1362,9 @@ export class Sim {
     while (S.milestone + 1 < MILESTONES.length && S.popPeak >= MILESTONES[S.milestone + 1].pop) {
       S.milestone++;
       const m = MILESTONES[S.milestone];
-      this.log(`🏆 Milestone: ${m.name}! ${m.note}`, 'good');
+      this.milestoneReward(m);
+      this.log(`🏆 Milestone: ${m.name}! ${m.note}${m.reward && !this.sandbox() ? ` Reward: $${m.reward.toLocaleString()}.` : ''}${m.areas ? ` +${m.areas} land permit${m.areas > 1 ? 's' : ''}.` : ''}`, 'good');
+      this.chirp(`We're officially a ${m.name}! 🎉`, 'good');
       if (this.G.ui && this.G.ui.onMilestone) this.G.ui.onMilestone(m);
     }
   }
@@ -1284,19 +1383,29 @@ export class Sim {
     const w = this.w;
     const S = JSON.parse(JSON.stringify(this.S, (k, v) => (v instanceof Map ? undefined : v)));
     const blds = [];
-    for (const b of this.blist()) blds.push({ kind: b.kind, arch: b.arch, key: b.key, zone: b.zone, style: b.style, level: b.level, lw: b.lw, ld: b.ld, x: b.x, z: b.z, w: b.w, d: b.d, facing: b.facing, seed: b.seed, state: b.state === 'burning' ? 'ok' : b.state, timer: b.timer, occ: b.occ, age: b.age, noBid: b.noBid, fill: b.fill });
-    return { v: 1, S, world: w.toJSON(), blds };
+    for (const b of this.blist()) blds.push({ id: b.id, kind: b.kind, arch: b.arch, key: b.key, zone: b.zone, style: b.style, level: b.level, lw: b.lw, ld: b.ld, x: b.x, z: b.z, w: b.w, d: b.d, facing: b.facing, seed: b.seed, state: b.state === 'burning' ? 'ok' : b.state, timer: b.timer, occ: b.occ, age: b.age, noBid: b.noBid, fill: b.fill });
+    S.activeDisasters = [];
+    return { v: 2, S, world: w.toJSON(), blds };
   }
   load(data) {
     const w = this.w;
-    this.S = Object.assign(defaultState(), data.S);
+    const def = defaultState({ mode: data.S && data.S.mode });
+    this.S = Object.assign(def, data.S);
+    for (const k of ['tax', 'budget', 'demand']) this.S[k] = Object.assign({}, def[k], data.S[k] || {});
+    this.S.activeDisasters = [];
     w.fromJSON(data.world);
+    if (!data.world.areas) w.areas.fill(1);           // older saves: everything already owned
+    const idMap = new Map();
     w.stops = new Map();
     if (this.G.view) { for (const c of this.G.view.chunks) { c.set.clear(); } }
     for (const o of data.blds) {
       const st = o.state, occ = o.occ, timer = o.timer, age = o.age, fill = o.fill;
-      const rec = Object.assign({}, o); delete rec.state; delete rec.timer; delete rec.occ; delete rec.age; delete rec.fill;
+      const rec = Object.assign({}, o); delete rec.state; delete rec.timer; delete rec.occ; delete rec.age; delete rec.fill; delete rec.id;
+      // v1 saves: offices lived in the Commercial High zone; move them to the new Office zone
+      if ((data.v || 1) < 2 && rec.kind === 'zone' && rec.arch === 'office') rec.zone = 9;
       const b = this.addBuilding(rec, { instant: st !== 'construct' });
+      if (o.id) idMap.set(o.id, b.id);
+      if ((data.v || 1) < 2 && rec.kind === 'zone' && rec.arch === 'office') for (let j = 0; j < b.d; j++) for (let i = 0; i < b.w; i++) w.zone[(b.z + j) * w.n + b.x + i] = 9;
       if (st === 'construct') b.timer = Math.max(1, timer || 2);
       else if (st !== 'ok') {
         b.state = st; b.timer = timer || 10;
@@ -1305,8 +1414,12 @@ export class Sim {
       }
       b.occ = occ || 0; b.age = age || 0; if (fill) b.fill = fill;
     }
-    this.recomputeLaws();
+    // metro lines refer to station building ids, which change on reload
+    for (const l of this.S.lines || []) if (l.type === 'metro') l.stops = l.stops.map((k) => idMap.get(k) || k);
+    this.recomputeLaws(); this.recomputeDistrictFx();
     this.computeNetworks(); this.updateUtilities(); this.updateEconomyStats(); this.updateMaps(true); this.candRev = -1;
     this.accum = 0;
   }
 }
+
+Object.assign(Sim.prototype, SimExt);

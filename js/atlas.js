@@ -3,7 +3,7 @@
 import * as THREE from '../lib/three.module.js';
 import { mulberry32, strSeed, shade, mix, hex2rgb, rgb2hex, clamp } from './util.js';
 
-const AW = 2048, AH = 4096;
+const AW = 4096, AH = 4096;
 const ROAD_S = 128;           // road cell size
 const FAC_S = 64;             // facade cell size
 const FAC_Y0 = ROAD_S * 6;    // facade region starts below road region
@@ -78,7 +78,17 @@ export class Atlas {
         this.ctx.translate(ox, oy);
         drawRoadCell(this.ctx, t, m, ROAD_S);
         this.ctx.restore();
-        this.roadCells[(t - 1) * 16 + m] = this._rect(ox, oy, ROAD_S, ROAD_S);
+        const cell = this._rect(ox, oy, ROAD_S, ROAD_S);
+        if (t >= 2 && t <= 5) {
+          // night-time pools of street light, sampled through the emissive map
+          const e = this.ectx;
+          e.save(); e.beginPath(); e.rect(ox / 2, oy / 2, ROAD_S / 2, ROAD_S / 2); e.clip();
+          e.translate(ox / 2, oy / 2); e.scale(0.5, 0.5);
+          drawRoadGlow(e, t, m, ROAD_S);
+          e.restore();
+          cell.glow = true;
+        }
+        this.roadCells[(t - 1) * 16 + m] = cell;
       }
     }
   }
@@ -400,6 +410,27 @@ function drawRoadCell(ctx, type, mask, S) {
   }
   ctx.restore();
 
+}
+
+function drawRoadGlow(ctx, type, mask, S) {
+  const c = S / 2;
+  const half = { 2: 0.62, 3: 0.84, 4: 0.88, 5: 0.96 }[type] * S / 2;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, S, S);
+  ctx.globalCompositeOperation = 'lighter';
+  const pool = (x, y, r, a) => {
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, `rgba(255,196,120,${a})`); g.addColorStop(0.55, `rgba(220,150,80,${a * 0.45})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  };
+  const a = type === 5 ? 0.3 : 0.42;
+  const nconn = [0, 1, 2, 3].filter((d) => mask & (1 << d)).length;
+  if (nconn >= 3) pool(c, c, S * 0.55, a * 0.9);
+  else {
+    const ns = (mask & 5) || mask === 0, ew = !!(mask & 10);
+    if (ns) { pool(c - half * 0.75, c, S * 0.42, a); pool(c + half * 0.75, c, S * 0.42, a * 0.85); }
+    if (ew) { pool(c, c - half * 0.75, S * 0.42, a); pool(c, c + half * 0.75, S * 0.42, a * 0.85); }
+  }
+  ctx.globalCompositeOperation = 'source-over';
 }
 
 function drawRail(ctx, mask, S, rnd) {

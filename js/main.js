@@ -6,7 +6,7 @@ import { Sim } from './sim.js';
 import { Traffic } from './traffic.js';
 import { Tools } from './tools.js';
 import { UI } from './ui.js';
-import { clamp } from './util.js';
+import { clamp, mulberry32 } from './util.js';
 import { STYLES, LOTS, BUILDINGS } from './data.js';
 import { DX, DZ } from './world.js';
 
@@ -30,11 +30,13 @@ async function boot() {
     throw e;
   }
   G.cam = new CamCtl(G.view, canvas);
+  G.cam.onUnfollow = () => G.ui.refreshCim(true);
   G.cam.td = 78; G.cam.ty = 0.5; G.cam.tp = 0.62;
   G.sim = new Sim(G);
   G.traffic = new Traffic(G);
-  G.traffic.buildModels(G.view.atlas, G.view.matTree, G.view.scene);
+  G.traffic.buildModels(G.view.atlas, G.view.matCar, G.view.scene);
   G.tools = new Tools(G);
+  G.world.canEdit = (x, z) => G.sim.ownsTile(x, z);
   G.sim.reset({ name: 'Fairhaven', mode: 'career' });
   G.sim.S.speed = 0;
   G.ui.applySettings();
@@ -50,14 +52,19 @@ async function boot() {
 /** Generate a spread of buildings once so the texture atlas is filled before play (avoids hitching). */
 async function prewarm() {
   const view = G.view;
-  const archs = ['house', 'apt', 'shop', 'office', 'factory'];
+  const archs = ['house', 'row', 'apt', 'mixed', 'shop', 'store', 'office', 'factory'];
   let k = 0;
-  const total = 5 * 5 * 3 * 3 + Object.keys(BUILDINGS).length * 5;
+  const total = 5 * archs.length * 3 * 3 + Object.keys(BUILDINGS).length * 5 + 4 * 3;
   for (let st = 0; st < 5; st++) for (const arch of archs) for (let lvl = 1; lvl <= 3; lvl++) for (let s = 0; s < 3; s++) {
     const lots = LOTS[arch].map((l) => l[0]);
     const lot = lots[(s + lvl) % lots.length];
     try { view.arc.generate({ kind: 'zone', arch, style: st, level: lvl, lw: lot[0], ld: lot[1], x: 0, z: 0, w: lot[0], d: lot[1], facing: 2, seed: 1000 + st * 97 + lvl * 13 + s * 7, y0: 0 }); } catch (e) { console.warn('prewarm', st, arch, lvl, e.message); }
     if (++k % 18 === 0) { G.ui.setLoading(0.1 + 0.55 * (k / total), 'Surveying architecture…'); await sleep(0); }
+  }
+  for (const arch of ['agri', 'forest', 'ore', 'oil']) for (let lvl = 1; lvl <= 3; lvl++) {
+    const lot = LOTS[arch][0][0];
+    try { view.arc.generate({ kind: 'zone', arch, style: 0, level: lvl, lw: lot[0], ld: lot[1], x: 0, z: 0, w: lot[0], d: lot[1], facing: 2, seed: 77 + lvl, y0: 0 }); } catch (e) { console.warn('prewarm', arch, e.message); }
+    k++;
   }
   for (const key in BUILDINGS) {
     const d = BUILDINGS[key];
@@ -86,7 +93,8 @@ G.resetWorldView = () => {
 G.newGame = (o) => {
   const w = G.world;
   w.generate({ seed: o.seed, template: o.template, forest: o.forest });
-  G.sim.reset({ name: o.name, mode: o.mode, seed: o.seed });
+  if (o.template !== 'flat') w.makeHighwayEntry(mulberry32(o.seed * 13 + 1));
+  G.sim.reset({ name: o.name, mode: o.mode, seed: o.seed, climate: o.climate });
   G.sim.S.style = o.style;
   G.sim.S.template = o.template;
   G.resetWorldView();
@@ -96,7 +104,8 @@ G.newGame = (o) => {
   G.cam.focus(w.n / 2, w.n / 2, 64);
   G.cam.ty = 0.6; G.cam.tp = 0.85;
   G.ui.setOverlay('none'); G.ui.manualOverlay = false;
-  G.tools.setTool(null); G.tools.select(null);
+  G.view.setAreas(w.areas, false); G.view.labelsDirty = true;
+  G.tools.setTool(null); G.tools.select(null); G.tools.activeDistrict = null;
   G.ui.cat = null; G.ui.showSubbar(null); G.ui.markCat();
   G.started = true;
   G.sim.S.speed = 1;
@@ -107,7 +116,7 @@ G.newGame = (o) => {
 
 G.regenerate = (o) => {
   const S = G.sim.S;
-  G.newGame({ name: S.name, mode: S.mode, style: S.style, template: o.template, seed: o.seed, forest: o.forest });
+  G.newGame({ name: S.name, mode: S.mode, style: S.style, template: o.template, seed: o.seed, forest: o.forest, climate: S.climate });
 };
 
 G.loadData = (data) => {
@@ -118,6 +127,8 @@ G.loadData = (data) => {
   G.ui.buildStylebar();
   G.ui.refresh(0, true);
   G.cam.focus(G.world.n / 2, G.world.n / 2, 64);
+  G.view.setAreas(G.world.areas, G.ui.activeOverlay === 'areas'); G.view.labelsDirty = true;
+  G.tools.activeDistrict = null;
   G.started = true;
   G.sim.S.speed = 1; G.ui.setSpeed(1);
 };
@@ -153,6 +164,7 @@ function frame(t) {
     }
   }
   skyT -= dt;
+  G.view.setWeather(S, dt);
   if (skyT <= 0) { G.view.setTime(S.tod); skyT = 0.08; }
   G.view.frame(dt, S.speed);
   G.ui.refresh(dt);

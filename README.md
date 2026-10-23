@@ -1,11 +1,12 @@
 # 🏰 Fantasy City Builder
 
-A browser-based, Cities&nbsp;Skylines-style city builder. Sculpt your own terrain, then grow a city of up to
-**25,000 citizens** in five architectural styles — **Colonial, Georgian, Southern, American and Modern** —
-with zoning, roads, power & water, traffic, public services, laws and special industries.
+A browser-based city builder modelled on **Cities: Skylines**. Sculpt your own terrain, then grow a city of up to
+**25,000 citizens** in five architectural styles — **Colonial, Georgian, Southern, American and Modern** — with zoning,
+districts, map areas, roads and one-way streets, power & water, public transport lines, public services, policies,
+specialised industry, seasons, weather and disasters.
 
 No build step, no dependencies to install: it is a static site (vanilla ES modules + a vendored copy of
-[Three.js](https://threejs.org/)), so it hosts perfectly on **GitHub Pages**.
+[Three.js](https://threejs.org/) and its post-processing add-ons), so it hosts perfectly on **GitHub Pages**.
 
 ---
 
@@ -21,61 +22,58 @@ python3 -m http.server 8000      # or: npx serve .
 
 **On GitHub Pages**
 
-1. Create a repository and push this folder to it (the folder contents — `index.html`, `js/`, `css/`, `lib/` — must be the repo root).
-   ```bash
-   cd FantasyMapGen
-   git init && git add . && git commit -m "Fantasy City Builder"
-   git branch -M main
-   git remote add origin https://github.com/<you>/<repo>.git
-   git push -u origin main
-   ```
+1. Push this folder to a repository (the folder contents — `index.html`, `js/`, `css/`, `lib/` — must be the repo root).
 2. In the repo: **Settings → Pages → Build and deployment → Source: _Deploy from a branch_ → `main` / `(root)`** → Save.
    (Alternatively choose **GitHub Actions** — `.github/workflows/pages.yml` is included.)
 3. After a minute your game is live at `https://<you>.github.io/<repo>/`.
 
-> Requires a WebGL-capable browser. A dedicated GPU is recommended for large cities; the game lowers its own graphics
-> quality automatically if the frame rate is poor (Menu → Graphics quality).
+> Requires a WebGL 2 browser. Pick a graphics preset on the start screen or in Menu: **Low** (no shadows/effects),
+> **Medium** (shadows, night bloom, anti-aliasing) or **High** (soft shadows, ambient occlusion, bloom, full resolution).
+> The game steps down by itself if the frame rate stays poor.
 
 ---
 
 ## ✨ What's inside
 
-### Terrain
-Raise / lower / smooth / flatten land, flood it into **sea & lakes**, carve meandering **rivers**, refill land, plant or clear
-**forests**, paint **parks**. Or generate a map: *Coastal Bay, River Valley, Island, Lakeland, River Delta, Highlands,
-Archipelago, Open Plains* or a *Blank Canvas*. Roads cross water automatically as **bridges**.
+### Graphics
+Three presets · ambient occlusion · bloom on lit windows, street lights and car headlights at night · depth-based water with
+shore foam · contact shadows on buildings · **seasons** (spring greens, orange autumn trees, snow-covered winters) and **weather**
+(rain, thunderstorms with lightning, fog, snowfall) with three climates (Temperate, Boreal, Tropical) · day/night cycle.
 
-### Five architectural styles
-Every zone tile remembers the style it was painted with, so an old **Colonial** harbour can sit beside a **Modern** glass downtown.
-Houses, apartments, shops, offices and factories are procedurally modelled for each style and for three growth levels,
-with randomised palettes, so no two streets look the same. Civic buildings (schools, hospitals, town hall, churches…) use the
-active style too. Open **`gallery.html`** to inspect every model (day & night).
+### Terrain & land
+Raise / lower / smooth / flatten land, seas, lakes, meandering rivers, forests and parks, or generate one of nine maps.
+Every map has **natural resources** (fertile land, forests, ore, oil — see the *Natural resources* info view).
+You start with the four central **map areas** and a **highway connection**; milestones grant permits to **buy more land**.
 
-### Zoning & building
-Paint **Residential / Commercial / Industrial** (low & high density) or **hand-place** specific lot types from the *Buildings* tab.
-Buildings appear where roads, power and water reach, level up with land value and services, and are abandoned if neglected.
+### Zoning — 8 zone types, 5 styles
+Residential low / **medium (row homes)** / high, **mixed use** (shops below, flats above), commercial low / high
+(supermarkets, department stores, cinemas, hotels, malls), **office**, and industrial. Each style has many house designs —
+Cape Cods, saltboxes, Dutch gambrels, garrisons, thatched cottages, Regency villas, semi-detached pairs, shotguns, Creole
+cottages, raised Lowcountry houses, dogtrots, Craftsman bungalows, ranches, foursquares, Second Empire mansions,
+split-levels, A-frames, cantilevered and courtyard modern homes — with driveways, parked cars, mailboxes, gardens, pools,
+sheds, swing sets and more. Open **`gallery.html`** to browse them.
 
-### Infrastructure
-Dirt lanes, streets, avenues, tree-lined boulevards, highways and railways · power plants (wind, coal, solar, hydro), power-line
-pylons · water pumps, wells & sewage treatment · bus stops, depots, train stations · live **traffic simulation** with congestion,
-buses, trains, service vehicles and pedestrians.
+### Districts & policies
+Paint **districts**, name them and give each its own **policies** (smoke detectors, high-rise ban, heavy-traffic ban, tourism,
+green belt, nightlife, free Wi-Fi…) and an **industry specialisation** — farming, forestry, ore or oil — which turns industrial
+zones into farms with barns and greenhouses, sawmills, mines or oil fields (ore and oil run out!). City-wide laws work alongside.
 
-### Public services
-Schools → university, clinics → hospitals, police stations / HQ / courthouse / prison, fire stations / HQ, landfill, incinerator and
-recycling. Coverage radius, capacity and budget all matter; fires spread and crime happens.
+### Transport
+Lanes, streets, avenues, boulevards, highways, railways, bridges, **one-way streets**, traffic lights · **bus lines** and
+**metro lines** you draw stop by stop (each with its own colour, vehicle count and ridership) · trains, cargo rail terminal,
+**airport** with planes taking off and landing, ships · live traffic with congestion.
 
-### Laws
-Eighteen laws (curfew, smoking ban, rent control, clean air act, prohibition, heritage protection, gambling licences …) enacted from
-the Town Hall. Laws are only as effective as your **enforcement** (police coverage, budget, courthouse).
-
-### Special industries
-Farms, lumber mills (that fell your forests!), fishing harbours, quarries, container ports (with ships), distilleries, textile mills,
-oil refineries, tech campuses, resorts and casinos — each with terrain requirements, supply-chain bonuses and adoptable policies.
+### Services
+Education, health, **deathcare** (cemeteries & crematoriums with hearses), police, fire & rescue, **disaster shelters &
+response units**, garbage, **post offices & sorting**, **cell towers & telecom**, parks (plazas, dog parks, skate parks, pond
+parks, zoo, amusement park with a turning Ferris wheel) and landmarks (cathedral, opera house, triumphal arch, observatory …).
 
 ### Simulation
-RCI demand, taxes & per-service budgets, loans, happiness breakdown, education, health, pollution, noise, crime, land value,
-waste, power/water/sewage networks, tourism, milestones, day/night cycle with lit windows, overlays for everything, statistics,
-autosave + manual save/load + file export/import. Population is capped at **25,000**.
+RCIO demand, taxes per zone, utility fees, service budgets, loans · happiness breakdown · education, health, pollution, noise,
+crime, land value, waste · buildings level up (the info panel shows exactly what they still need) · 13 CS-style milestones
+with cash rewards · **disasters** (meteor, tornado, earthquake, forest fire — or trigger them in sandbox) · **Chirper** feed
+of citizen opinions · click any car, bus or pedestrian to meet the citizen and **follow** them · 23 info views · statistics
+with demographics · autosave + save/load + file export/import. Population is capped at **25,000**.
 
 ---
 
@@ -88,15 +86,16 @@ autosave + manual save/load + file export/import. Population is capped at **25,0
 | **Mouse wheel** | zoom to cursor |
 | **Right-drag** | orbit & tilt |
 | **Middle-drag / Space + drag** | pan |
-| **Left-click / drag** | use the selected tool (click a building with no tool to inspect it) |
+| **Left-click / drag** | use the selected tool · with no tool, click a building or a vehicle/citizen to inspect it |
 | **R** | rotate a building · flip the bend of a road |
 | **Shift** (while drawing roads) | straight line |
+| **Enter / Esc** | finish a transport line · cancel |
 | **1 2 3 / P** | speed / pause |
-| **O / G / B / Esc** | cycle overlays / toggle grid / bulldoze / cancel |
+| **O / G / B** | cycle info views / toggle grid / bulldoze |
 
-**Getting started:** shape the land → place a wind turbine (or coal plant) and a water pump (shore) or well → connect them with roads →
-pick a style and zone land beside the roads → add schools, clinics, police and fire stations → build a Town Hall for laws →
-unlock more as you grow.
+**Getting started:** connect a road to the highway → place a wind turbine and a water pump (shore) or well beside the road →
+zone residential, commercial and industrial land → add schools, clinics, police and fire stations → build a Town Hall for laws →
+draw bus lines when traffic builds up → buy more land as milestones arrive.
 
 ---
 
@@ -104,20 +103,20 @@ unlock more as you grow.
 
 ```
 index.html            game entry
-gallery.html          architecture gallery (all buildings, day/night)
+gallery.html          architecture gallery
 css/style.css         UI theme
-lib/three.module.js   vendored Three.js r160 (MIT)
+lib/                  vendored Three.js r160 + post-processing add-ons (MIT)
 js/
   main.js             boot, game loop, new/load game
-  world.js            heightmap, tile layers, terrain generation & terraforming
-  data.js             styles, roads, buildings, industries, laws, milestones
-  sim.js              economy, growth, utilities, services, happiness, events
-  traffic.js          A* pathfinding, vehicles, trains, ships, pedestrians
-  view.js             terrain, water, roads, chunked buildings, trees, sky, FX
-  ground.js           procedural terrain texture painter
-  atlas.js            procedural road / facade / roof texture atlas
+  world.js            heightmap, tile layers, resources, districts, terrain generation
+  data.js             styles, zones, roads, buildings, laws, district policies, milestones
+  sim.js, sim_ext.js  economy, growth, services, districts, areas, transit lines, deathcare, disasters, Chirper
+  weather.js          seasons, weather, precipitation
+  traffic.js          pathfinding (one-way aware), vehicles, bus lines, planes, citizens
+  view.js, post.js    renderer, water, roads, buildings, trees, sky, effects, graphics presets
+  ground.js, atlas.js procedural terrain & facade textures
   kit.js, build_*.js, architect.js   procedural building generators
   tools.js, ui.js, camctl.js         input, interface, camera
 ```
 
-Everything is data-driven: tweak costs, unlocks, laws and industries in `js/data.js`.
+Everything is data-driven: tweak costs, unlocks, policies and industries in `js/data.js`.

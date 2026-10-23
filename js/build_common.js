@@ -244,8 +244,8 @@ export function fence(b, x0, z0, x1, z1, h = 0.07, tint = '#f2efe6') {
   });
   const dx = x1 - x0, dz = z1 - z0, len = Math.hypot(dx, dz);
   if (len < 0.01) return;
-  // two-sided: draw wall both ways
-  const nx = dz / len, nz = -dx / len;
+  // two-sided: one wall from (x0,z0) to (x1,z1) and its mirror; wall() runs along (nz, -nx)
+  const nx = -dz / len, nz = dx / len;
   b.wall(x0, z0, nx, nz, len, 0, h, cell, tint, 0.16, 0);
   b.wall(x1, z1, -nx, -nz, len, 0, h, cell, tint, 0.16, 0);
 }

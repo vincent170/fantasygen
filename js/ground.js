@@ -1,17 +1,17 @@
 // Paints the terrain "macro" texture (8 px / tile) from heights, trees, zones and lots.
 import * as THREE from '../lib/three.module.js';
 import { Noise, clamp, lerp, smoothstep, hash2, mulberry32 } from './util.js';
-import { ZONE_INFO, Z } from './data.js';
+import { ZONE_INFO, Z, isBuildZone } from './data.js';
 
 export const LOT_KIND = { lawn: 1, pave: 2, dirt: 3, farm: 4, park: 5, sport: 6, plaza: 7, rock: 8 };
 
 const mix3 = (a, b, t, out) => { out[0] = a[0] + (b[0] - a[0]) * t; out[1] = a[1] + (b[1] - a[1]) * t; out[2] = a[2] + (b[2] - a[2]) * t; };
 
 const C = {
-  grassA: [88, 142, 62], grassB: [112, 160, 72], dry: [150, 152, 84], forest: [58, 96, 48], floor: [84, 78, 52],
+  grassA: [92, 136, 64], grassB: [116, 150, 76], dry: [150, 152, 84], forest: [58, 96, 48], floor: [84, 78, 52],
   sand: [222, 205, 160], wet: [182, 164, 120], rock: [128, 124, 114], rockD: [96, 92, 86], snow: [240, 244, 248],
   seaShallow: [120, 180, 170], seaMid: [40, 120, 140], seaDeep: [14, 52, 84], seabedSand: [196, 180, 132],
-  lawn: [112, 168, 76], pave: [158, 154, 146], dirt: [148, 120, 84], plaza: [196, 186, 164], park: [96, 172, 72], sport: [78, 156, 66],
+  lawn: [106, 152, 78], pave: [158, 154, 146], dirt: [148, 120, 84], plaza: [196, 186, 164], park: [92, 156, 74], sport: [78, 150, 66],
 };
 
 export class GroundPainter {
@@ -104,7 +104,7 @@ export class GroundPainter {
       const ti = tz * n + tx;
       const hc = w.tileCorners(tx, tz);
       const lot = w.lot[ti], zone = w.zone[ti], hasPark = w.park[ti];
-      const zc = zone && zone <= 5 ? ZONE_INFO[zone].color : null;
+      const zc = isBuildZone(zone) ? ZONE_INFO[zone].color : null;
       const treeV = w.tree[ti];
       // neighbour park flags for paths
       const pN = tz > 0 && (w.park[ti - n] || w.lot[ti - n] === 5), pS = tz < n - 1 && (w.park[ti + n] || w.lot[ti + n] === 5);

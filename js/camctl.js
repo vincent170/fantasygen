@@ -85,6 +85,12 @@ export class CamCtl {
 
   update(dt) {
     dt = clamp(dt, 0, 0.1);
+    // follow a vehicle / citizen picked by the player
+    if (this.follow) {
+      const v = this.follow;
+      if (v.gone) this.follow = null;
+      else { this.tt.x = v.x; this.tt.z = v.z; }
+    }
     if (this.enabled) {
       const k = this.keys;
       let mx = 0, mz = 0;
@@ -92,6 +98,7 @@ export class CamCtl {
       if (k.has('KeyS') || k.has('ArrowDown')) mz -= 1;
       if (k.has('KeyD') || k.has('ArrowRight')) mx += 1;
       if (k.has('KeyA') || k.has('ArrowLeft')) mx -= 1;
+      if ((mx || mz) && this.follow) { this.follow = null; if (this.onUnfollow) this.onUnfollow(); }
       if (mx || mz) {
         const sp = this.td * 0.85 * dt * (k.has('ShiftLeft') || k.has('ShiftRight') ? 2.2 : 1);
         const fx = -Math.sin(this.ty), fz = -Math.cos(this.ty), rx = Math.cos(this.ty), rz = -Math.sin(this.ty);
@@ -118,6 +125,8 @@ export class CamCtl {
     const cp = Math.cos(this.pitch);
     const pos = new THREE.Vector3(this.t.x + Math.sin(this.yaw) * cp * this.dist, this.t.y + Math.sin(this.pitch) * this.dist, this.t.z + Math.cos(this.yaw) * cp * this.dist);
     const cam = this.v.camera;
+    const sh = this.v.shake || 0;
+    if (sh > 0) { pos.x += (Math.random() - 0.5) * sh; pos.y += (Math.random() - 0.5) * sh * 0.6; pos.z += (Math.random() - 0.5) * sh; }
     cam.position.copy(pos); cam.lookAt(this.t);
     this.v.camTarget = this.t; this.v.camDist = this.dist;
     // fog follows zoom

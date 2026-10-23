@@ -803,3 +803,4 @@ export const ZONE_GEN = {
 };
 
 export { polyTower };
+export const PAL = { COL, GEO, SOU, AMER, MOD };

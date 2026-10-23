@@ -1,6 +1,9 @@
 // Turns a building record into world-space geometry.
 import { MB } from './kit.js';
 import { ZONE_GEN } from './build_zone.js';
+import './build_houses.js';
+import { DENSE_GEN, SPEC_GEN } from './build_dense.js';
+import './build_special2.js';
 import { SPECIAL_GEN, PYLON } from './build_special.js';
 import { STYLES, BUILDINGS } from './data.js';
 import { mulberry32 } from './util.js';
@@ -33,6 +36,7 @@ export class Architect {
   generate(rec, opts = {}) {
     const b = new MB(this.A);
     b.smoke = [];
+    b.ao = true;
     const rng = mulberry32(rec.seed | 0);
     const st = this.styleKey(rec.style || 0);
     let info;
@@ -47,8 +51,8 @@ export class Architect {
     if (opts.construction) {
       info = this.construction(b, rng, rec);
     } else if (rec.kind === 'zone') {
-      const fn = ZONE_GEN[st][rec.arch];
-      info = fn({ b, rng, lw: rec.lw, ld: rec.ld, level: rec.level || 1 });
+      const fn = ZONE_GEN[st][rec.arch] || DENSE_GEN[rec.arch] || SPEC_GEN[rec.arch];
+      info = fn({ b, rng, lw: rec.lw, ld: rec.ld, level: rec.level || 1, st });
     } else {
       const fn = SPECIAL_GEN[rec.key];
       if (!fn) throw new Error('no generator for ' + rec.key);
@@ -62,6 +66,8 @@ export class Architect {
     if (info.rotor) { info.rotorPos = T(info.rotor); info.rotorYaw = rot; }
     if (info.fountain) info.fountainPos = T(info.fountain);
     if (info.flare) info.flarePos = T(info.flare);
+    if (info.wheel) { info.wheelPos = T(info.wheel); info.wheelR = info.wheel[3]; info.wheelYaw = rot; }
+    if (info.runway) info.runwayW = info.runway.map(T);
     return { geo, info };
   }
 

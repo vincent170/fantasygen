@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🏛️%3C/text%3E%3C/svg%3E">
   <title>Architecture Gallery – Fantasy City Builder</title>
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -17,11 +18,12 @@
     a { color: #e8c26a; align-self: center; margin: 0 8px; font-size: 13px; }
     #label { position: fixed; z-index: 5; left: 14px; top: 16px; max-width: 220px; color: #98a2bb; font-size: 12.5px; pointer-events: none; text-shadow: 0 1px 4px #000; }
   </style>
+  <script type="importmap">{ "imports": { "three": "./lib/three.module.js" } }</script>
 </head>
 <body>
   <div class="bar" id="top"><h1>Architecture Gallery</h1><span id="styles"></span><a href="index.html">▶ Play the game</a></div>
   <div class="bar" id="bottom"><span id="groups"></span><button id="tod">☀️ Day</button><button id="spin" class="on">⟳ Rotate</button></div>
-  <div id="label">Drag to orbit · scroll to zoom · each row shows building levels 1 → 3</div>
+  <div id="label">Drag to orbit · scroll to zoom · rows show building levels 1 → 3; every lot is generated, so no two are quite the same</div>
   <script type="module">
     import * as THREE from './lib/three.module.js';
     import { Atlas } from './js/atlas.js';
@@ -46,8 +48,8 @@
     ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
 
     const GROUPS = [
-      ['house', 'Houses'], ['apt', 'Apartments'], ['shop', 'Shops'], ['office', 'Offices'], ['factory', 'Factories'],
-      ['civic', 'Services'], ['power', 'Utilities'], ['parks', 'Parks & Landmarks'], ['industries', 'Industries'],
+      ['house', 'Houses'], ['row', 'Row Homes'], ['apt', 'Apartments'], ['mixed', 'Mixed Use'], ['shop', 'Shops'], ['store', 'Stores & Hotels'], ['office', 'Offices'], ['factory', 'Factories'], ['spec', 'Farms, Mills, Mines & Oil'],
+      ['civic', 'Services'], ['power', 'Utilities'], ['parks', 'Parks'], ['landmarks', 'Landmarks'], ['industries', 'Industries'], ['transit', 'Transport'],
     ];
     const state = { style: 1, group: 'house', night: false, spin: true, yaw: 0.6, pitch: 0.62, dist: 22, target: new THREE.Vector3(0, 0, 0) };
     let content = new THREE.Group(); scene.add(content);
@@ -58,17 +60,22 @@
         try { const { geo } = arc.generate(Object.assign({ x: col, z: row, w: rec.lw, d: rec.ld, facing: 2, y0: 0, seed: 11 + col * 7 + row * 13 }, rec)); const m = new THREE.Mesh(toGeometry(geo), mat); m.castShadow = m.receiveShadow = true; content.add(m); } catch (e) { console.warn(e); }
       };
       let w = 4, h = 4;
-      if (['house', 'apt', 'shop', 'office', 'factory'].includes(state.group)) {
+      if (state.group === 'spec') {
+        ['agri', 'forest', 'ore', 'oil'].forEach((arch, row) => { for (let lvl = 1; lvl <= 3; lvl++) { const lot = LOTS[arch][0][0]; add({ kind: 'zone', arch, style: state.style, level: lvl, lw: lot[0], ld: lot[1], seed: 40 + lvl * 13 + row }, (lvl - 1) * 4.5, row * 4.5); } });
+        w = 3 * 4.5; h = 18;
+      } else if (['house', 'row', 'apt', 'mixed', 'shop', 'store', 'office', 'factory'].includes(state.group)) {
         const lots = LOTS[state.group].map((l) => l[0]);
-        for (let lvl = 1; lvl <= 3; lvl++) for (let v = 0; v < 3; v++) {
+        const per = state.group === 'house' ? 5 : 3;
+        const gap = Math.max(...lots.map((l) => Math.max(l[0], l[1]))) + 1.5;
+        for (let lvl = 1; lvl <= 3; lvl++) for (let v = 0; v < per; v++) {
           const lot = lots[(lvl - 1 + v) % lots.length];
-          add({ kind: 'zone', arch: state.group, style: state.style, level: lvl, lw: lot[0], ld: lot[1], seed: 100 + lvl * 31 + v * 17 + state.style * 7 }, v * 4.5, (lvl - 1) * 5);
+          add({ kind: 'zone', arch: state.group, style: state.style, level: lvl, lw: lot[0], ld: lot[1], seed: 100 + lvl * 31 + v * 17 + state.style * 7 }, v * gap, (lvl - 1) * (gap + 0.5));
         }
-        w = 3 * 4.5; h = 15;
+        w = per * gap; h = 3 * (gap + 0.5);
       } else {
-        const cats = state.group === 'civic' ? ['education', 'health', 'police', 'fire', 'civic', 'waste', 'transit'] : state.group === 'power' ? ['power', 'water'] : state.group === 'parks' ? ['parks', 'landmarks'] : ['industries'];
+        const cats = state.group === 'civic' ? ['education', 'health', 'police', 'fire', 'civic', 'waste'] : state.group === 'power' ? ['power', 'water'] : state.group === 'parks' ? ['parks'] : state.group === 'landmarks' ? ['landmarks'] : state.group === 'transit' ? ['transit'] : ['industries'];
         const keys = Object.keys(BUILDINGS).filter((k) => cats.includes(BUILDINGS[k].cat) && k !== 'pylon' && k !== 'bus_stop');
-        let x = 0, z = 0, rowH = 0; const maxW = 26;
+        let x = 0, z = 0, rowH = 0; const maxW = state.group === 'transit' ? 18 : 26;
         for (const k of keys) {
           const d = BUILDINGS[k];
           if (x + d.w > maxW) { x = 0; z += rowH + 1.5; rowH = 0; }

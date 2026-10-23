@@ -4,7 +4,7 @@ import { shell, parapet, cornice, quoins, chimney, porch, portico, dormer, awnin
 import { polyTower } from './build_zone.js';
 
 // ---------------------------------------------------------------- style palettes for civic buildings
-const CIV = {
+export const CIV = {
   colonial: { m: 'clap', cs: ['#efe9d6', '#e9d9b0', '#d8dfe2'], roofM: 'shingle', roofC: '#5a5048', win: 'small', trim: '#f4f1e7', shutter: '#2f5a3d', roof: 'gable', fh: 0.28 },
   georgian: { m: 'brick', cs: ['#a4472f', '#9c5a3c', '#a9553a'], roofM: 'slate', roofC: '#4b5360', win: 'sash', trim: '#f2efe4', shutter: null, roof: 'hip', fh: 0.3 },
   southern: { m: 'clap', cs: ['#f4f1e8', '#efe2bd', '#f6f2e6'], roofM: 'metal', roofC: '#8a9099', win: 'tall', trim: '#fbf8ee', shutter: '#2c4a35', roof: 'hip', fh: 0.32 },
@@ -12,7 +12,7 @@ const CIV = {
   modern: { m: 'conc', cs: ['#d8d6cf', '#f1f0ea', '#cfcdc6'], roofM: 'gravel', roofC: '#6e6e6a', win: 'ribbon', trim: '#d5d3cc', shutter: null, roof: 'flat', fh: 0.3 },
 };
 
-function signCell(A, text, bg, fg = '#ffffff') {
+export function signCell(A, text, bg, fg = '#ffffff') {
   return A.decal('txt:' + text + bg + fg, (ctx, S) => {
     ctx.fillStyle = bg; ctx.fillRect(0, 0, S, S);
     ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.fillRect(0, 0, S, 1); ctx.fillRect(0, S - 1, S, 1);
@@ -24,21 +24,21 @@ function signCell(A, text, bg, fg = '#ffffff') {
     ctx.restore();
   });
 }
-function signBoard(b, text, bg, cx, z, y, w = 0.3, h = 0.075, fg) {
+export function signBoard(b, text, bg, cx, z, y, w = 0.3, h = 0.075, fg) {
   b.wall(cx - w / 2, z + 0.004, 0, 1, w, y, y + h, signCell(b.A, text, bg, fg), [1, 1, 1], 0, 0);
 }
-function flagpole(b, x, z, h = 0.6) {
+export function flagpole(b, x, z, h = 0.6) {
   const w = b.A.white;
   b.cyl(x, z, 0.006, 0, h, 5, w, '#d8d8d8', { cap: false });
   b.box(x, h - 0.1, z, x + 0.12, h - 0.03, z + 0.004, w, '#c0392b', { rep: 0 });
   b.box(x, h - 0.075, z, x + 0.05, h - 0.03, z + 0.005, w, '#2b4a7a', { rep: 0 });
 }
-function bench(b, x, z, w = 0.1) { const A = b.A.white; b.box(x, 0.02, z, x + w, 0.04, z + 0.03, A, '#7a5a3d', { rep: 0, top: A }); b.box(x, 0.0, z, x + 0.01, 0.02, z + 0.03, A, '#333', { rep: 0 }); b.box(x + w - 0.01, 0, z, x + w, 0.02, z + 0.03, A, '#333', { rep: 0 }); }
+export function bench(b, x, z, w = 0.1) { const A = b.A.white; b.box(x, 0.02, z, x + w, 0.04, z + 0.03, A, '#7a5a3d', { rep: 0, top: A }); b.box(x, 0.0, z, x + 0.01, 0.02, z + 0.03, A, '#333', { rep: 0 }); b.box(x + w - 0.01, 0, z, x + w, 0.02, z + 0.03, A, '#333', { rep: 0 }); }
 function crate(b, x, y, z, s, color) { b.box(x, y, z, x + s, y + s * 0.8, z + s, b.A.white, color, { rep: 0, top: b.A.white }); }
 function copperDome(b, cx, cz, y, r, h = r * 0.9) { b.dome(cx, cz, r, y, h, 12, 4, b.A.roof({ m: 'copper', c: '#5e8a74' }), [1, 1, 1]); }
 
 /** styled civic block. returns {s, r, P} */
-function civic(b, rng, st, lw, ld, o = {}) {
+export function civic(b, rng, st, lw, ld, o = {}) {
   const A = b.A, P = CIV[st];
   const r = o.r || { x0: 0.08, x1: lw - 0.08, z0: 0.1, z1: ld - 0.25 };
   const floors = o.floors || 2;
